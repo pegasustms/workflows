@@ -23,8 +23,6 @@ on:
         required: true
       PACKAGES_TOKEN:
         required: false
-      GITHUB_TOKEN:
-        required: true
 
 jobs:
   build-and-deploy:
