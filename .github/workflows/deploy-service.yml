@@ -160,7 +160,7 @@ jobs:
 
       - name: Create Release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
         run: |
           TAG_NAME="v$VERSION"
           
