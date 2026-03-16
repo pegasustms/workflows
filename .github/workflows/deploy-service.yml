@@ -1,0 +1,169 @@
+name: Deploy Service (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+        description: 'Nome do serviço (ex: *-service)'
+      ecr_repository:
+        required: true
+        type: string
+        description: 'Nome do repositório ECR (ex: pegasus/*-service)'
+      expose_port:
+        required: false
+        type: string
+        default: '8080'
+        description: 'Porta exposta pelo serviço'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      PACKAGES_TOKEN:
+        required: false
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy ${{ inputs.service_name }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    
+    permissions:
+      contents: write
+      packages: read
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+      ECS_CLUSTER: pegasus-${{ github.ref_name == 'main' && 'prod' || 'dev' }}-cluster
+      ECS_SERVICE: pegasus-${{ github.ref_name == 'main' && 'prod' || 'dev' }}-${{ inputs.service_name }}
+      ENVIRONMENT: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate Version
+        run: |
+          TZ="America/Sao_Paulo"
+          DATE=$(TZ=$TZ date +'%Y%m%d')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "VERSION=${DATE}-${SHORT_SHA}-${ENVIRONMENT}" >> $GITHUB_ENV
+
+      - name: Display Version
+        run: |
+          echo "Build Version: $VERSION"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build, tag, and push image to ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ env.VERSION }}
+        run: |
+          docker buildx build --platform linux/amd64 \
+            --build-arg GITHUB_ACTOR=${{ github.actor }} \
+            --build-arg GITHUB_TOKEN=${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }} \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            -t $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $REGISTRY/$ECR_REPOSITORY:latest \
+            --push \
+            .
+          
+          # Move cache to avoid growing cache size indefinitely
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Update task definition with new image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ env.VERSION }}
+        run: |
+          TASK_DEF_JSON=$(aws ecs describe-task-definition \
+            --task-definition $ECS_SERVICE \
+            --region $AWS_REGION \
+            --query 'taskDefinition')
+
+          NEW_IMAGE="$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          FULL_SHA="${{ github.sha }}"
+
+          NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq \
+            --arg IMAGE "$NEW_IMAGE" \
+            --arg SERVICE "${{ inputs.service_name }}" \
+            --arg APP_VERSION "$VERSION" \
+            --arg GIT_SHA "$FULL_SHA" \
+            '.containerDefinitions = [.containerDefinitions[] | 
+              if .name == $SERVICE then 
+                .image = $IMAGE | 
+                .environment = (.environment // [] | 
+                  map(select(.name != "APP_VERSION" and .name != "GIT_COMMIT_SHA")) + 
+                  [{name: "APP_VERSION", value: $APP_VERSION}, {name: "GIT_COMMIT_SHA", value: $GIT_SHA}]
+                )
+              else . end
+            ] | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --region $AWS_REGION \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
+          echo "Registered new task definition: $TASK_DEF_ARN with image $NEW_IMAGE"
+          echo "APP_VERSION=$VERSION, GIT_COMMIT_SHA=$FULL_SHA"
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --task-definition $TASK_DEF_ARN \
+            --desired-count 1 \
+            --region $AWS_REGION \
+            --force-new-deployment
+
+          echo "Deployment initiated for $ECS_SERVICE"
+
+      - name: Wait for deployment
+        run: |
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --region $AWS_REGION
+          
+          echo "Service $ECS_SERVICE is now stable!"
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG_NAME="v$VERSION"
+          
+          gh release create "$TAG_NAME" \
+            --title "Release $VERSION" \
+            --notes "**Environment:** ${{ env.ENVIRONMENT }}\n**Commit:** ${{ github.sha }}\n**Image:** ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$VERSION\n**Deployed at:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" \
+            --target ${{ github.sha }}
