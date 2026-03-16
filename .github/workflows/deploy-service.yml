@@ -21,8 +21,8 @@ on:
         required: true
       AWS_SECRET_ACCESS_KEY:
         required: true
-      PACKAGES_TOKEN:
-        required: false
+      WORKFLOW_TOKEN:
+        required: true
 
 jobs:
   build-and-deploy:
@@ -44,7 +44,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ github.token }}
+          token: ${{ secrets.WORKFLOW_TOKEN }}
 
       - name: Generate Version
         run: |
@@ -86,7 +86,7 @@ jobs:
         run: |
           docker buildx build --platform linux/amd64 \
             --build-arg GITHUB_ACTOR=${{ github.actor }} \
-            --build-arg GITHUB_TOKEN=${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }} \
+            --build-arg GITHUB_TOKEN=${{ secrets.WORKFLOW_TOKEN || secrets.GITHUB_TOKEN }} \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
             -t $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
