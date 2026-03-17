@@ -157,14 +157,6 @@ jobs:
             --region $AWS_REGION
           
           echo "Service $ECS_SERVICE is now stable!"
-
-      - name: Create Release
-        env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
-        run: |
-          TAG_NAME="v$VERSION"
-          
-          gh release create "$TAG_NAME" \
-            --title "Release $VERSION" \
-            --notes "**Environment:** ${{ env.ENVIRONMENT }}\n**Commit:** ${{ github.sha }}\n**Image:** ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$VERSION\n**Deployed at:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" \
-            --target ${{ github.sha }}
+          echo "✅ Deployment completed successfully!"
+          echo "Version: $VERSION"
+          echo "Image: ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$VERSION"
