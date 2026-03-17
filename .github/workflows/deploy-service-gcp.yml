@@ -16,6 +16,11 @@ on:
         type: string
         default: '8080'
         description: 'Porta exposta pelo serviço'
+      allow_unauthenticated:
+        required: false
+        type: boolean
+        default: false
+        description: 'Permitir acesso público não autenticado (apenas api-gateway)'
     secrets:
       GCP_PROJECT_ID:
         required: true
@@ -120,7 +125,7 @@ jobs:
             --image=$IMAGE_URI \
             --region=${{ env.GCP_REGION }} \
             --platform=managed \
-            --allow-unauthenticated \
+            ${{ inputs.allow_unauthenticated && '--allow-unauthenticated' || '--no-allow-unauthenticated' }} \
             --port=${{ inputs.expose_port }} \
             --set-env-vars="APP_VERSION=$VERSION,GIT_COMMIT_SHA=$FULL_SHA,ENVIRONMENT=$ENVIRONMENT" \
             --min-instances=0 \
