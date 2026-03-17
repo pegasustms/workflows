@@ -1,4 +1,4 @@
-name: Deploy Service to GCP (Reusable)
+name: Build and Push Docker Image to GCP (Reusable)
 
 on:
   workflow_call:
@@ -11,16 +11,6 @@ on:
         required: true
         type: string
         description: 'Nome do repositório Artifact Registry (ex: pegasus-dev)'
-      expose_port:
-        required: false
-        type: string
-        default: '8080'
-        description: 'Porta exposta pelo serviço'
-      allow_unauthenticated:
-        required: false
-        type: boolean
-        default: false
-        description: 'Permitir acesso público não autenticado (apenas api-gateway)'
     secrets:
       GCP_PROJECT_ID:
         required: true
@@ -32,8 +22,8 @@ on:
         required: true
 
 jobs:
-  build-and-deploy:
-    name: Build & Deploy ${{ inputs.service_name }}
+  build-and-push:
+    name: Build & Push ${{ inputs.service_name }}
     runs-on: ubuntu-latest
     environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
     
@@ -43,34 +33,27 @@ jobs:
       packages: read
 
     env:
-      GCP_REGION: ${{ vars.GCP_REGION || 'us-east4' }}
-      ARTIFACT_REGISTRY_LOCATION: ${{ vars.GCP_REGION || 'us-east4' }}
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_REGION: us-east4
+      ARTIFACT_REGISTRY_LOCATION: us-east4
       ARTIFACT_REGISTRY_REPOSITORY: ${{ inputs.artifact_registry_repository }}
       CLOUD_RUN_SERVICE: ${{ inputs.service_name }}
       ENVIRONMENT: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
-      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.WORKFLOW_TOKEN }}
 
-      - name: Generate Version
+      - name: Generate version
+        id: version
         run: |
-          TZ="America/Sao_Paulo"
-          DATE=$(TZ=$TZ date +'%Y%m%d')
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          echo "VERSION=${DATE}-${SHORT_SHA}-${ENVIRONMENT}" >> $GITHUB_ENV
-
-      - name: Display Version
-        run: |
-          echo "Build Version: $VERSION"
-          echo "Service: ${{ inputs.service_name }}"
-          echo "Environment: $ENVIRONMENT"
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          VERSION="${TIMESTAMP}-${SHORT_SHA}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Generated version: $VERSION"
 
       - name: Authenticate to Google Cloud
-        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -81,7 +64,7 @@ jobs:
 
       - name: Configure Docker for Artifact Registry
         run: |
-          gcloud auth configure-docker ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev
+          gcloud auth configure-docker ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev --quiet
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -113,38 +96,10 @@ jobs:
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
-      - name: Deploy to Cloud Run
-        env:
-          IMAGE_TAG: ${{ env.VERSION }}
-          REGISTRY: ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPOSITORY }}
+      - name: Image pushed successfully
         run: |
-          IMAGE_URI="$REGISTRY/${{ inputs.service_name }}:$IMAGE_TAG"
-          FULL_SHA="${{ github.sha }}"
-          
-          # Update only the image, preserving all other configuration from Terraform
-          gcloud run services update ${{ env.CLOUD_RUN_SERVICE }} \
-            --image=$IMAGE_URI \
-            --region=${{ env.GCP_REGION }} \
-            --update-env-vars="APP_VERSION=$VERSION,GIT_COMMIT_SHA=$FULL_SHA" \
-            --quiet
-          
-          # Update IAM policy only if specified (for api-gateway)
-          if [ "${{ inputs.allow_unauthenticated }}" = "true" ]; then
-            gcloud run services add-iam-policy-binding ${{ env.CLOUD_RUN_SERVICE }} \
-              --region=${{ env.GCP_REGION }} \
-              --member="allUsers" \
-              --role="roles/run.invoker" \
-              --quiet || true
-          fi
-
-      - name: Get Cloud Run URL
-        run: |
-          SERVICE_URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
-            --region=${{ env.GCP_REGION }} \
-            --format='value(status.url)')
-          
-          echo "✅ Deployment completed successfully!"
+          echo "✅ Image pushed successfully!"
           echo "Service: ${{ inputs.service_name }}"
           echo "Version: $VERSION"
           echo "Image: ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPOSITORY }}/${{ inputs.service_name }}:$VERSION"
-          echo "URL: $SERVICE_URL"
+          echo "Latest: ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPOSITORY }}/${{ inputs.service_name }}:latest"
