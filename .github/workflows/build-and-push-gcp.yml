@@ -49,7 +49,7 @@ jobs:
         run: |
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          VERSION="${TIMESTAMP}-${SHORT_SHA}"
+          VERSION="${TIMESTAMP}-${SHORT_SHA}-${{ env.ENVIRONMENT }}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "Generated version: $VERSION"
 
