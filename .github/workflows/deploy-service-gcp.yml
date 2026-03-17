@@ -1,0 +1,144 @@
+name: Deploy Service to GCP (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+        description: 'Nome do serviço (ex: *-service)'
+      artifact_registry_repository:
+        required: true
+        type: string
+        description: 'Nome do repositório Artifact Registry (ex: pegasus-dev)'
+      expose_port:
+        required: false
+        type: string
+        default: '8080'
+        description: 'Porta exposta pelo serviço'
+    secrets:
+      GCP_PROJECT_ID:
+        required: true
+      GCP_WORKLOAD_IDENTITY_PROVIDER:
+        required: true
+      GCP_SERVICE_ACCOUNT:
+        required: true
+      WORKFLOW_TOKEN:
+        required: true
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy ${{ inputs.service_name }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+
+    env:
+      GCP_REGION: ${{ vars.GCP_REGION || 'us-east4' }}
+      ARTIFACT_REGISTRY_LOCATION: ${{ vars.GCP_REGION || 'us-east4' }}
+      ARTIFACT_REGISTRY_REPOSITORY: ${{ inputs.artifact_registry_repository }}
+      CLOUD_RUN_SERVICE: ${{ inputs.service_name }}
+      ENVIRONMENT: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.WORKFLOW_TOKEN }}
+
+      - name: Generate Version
+        run: |
+          TZ="America/Sao_Paulo"
+          DATE=$(TZ=$TZ date +'%Y%m%d')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "VERSION=${DATE}-${SHORT_SHA}-${ENVIRONMENT}" >> $GITHUB_ENV
+
+      - name: Display Version
+        run: |
+          echo "Build Version: $VERSION"
+          echo "Service: ${{ inputs.service_name }}"
+          echo "Environment: $ENVIRONMENT"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build, tag, and push image to Artifact Registry
+        env:
+          IMAGE_TAG: ${{ env.VERSION }}
+          REGISTRY: ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPOSITORY }}
+        run: |
+          docker buildx build --platform linux/amd64 \
+            --build-arg GITHUB_ACTOR=${{ github.actor }} \
+            --build-arg GITHUB_TOKEN=${{ secrets.WORKFLOW_TOKEN || secrets.GITHUB_TOKEN }} \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            -t $REGISTRY/${{ inputs.service_name }}:$IMAGE_TAG \
+            -t $REGISTRY/${{ inputs.service_name }}:latest \
+            --push \
+            .
+          
+          # Move cache to avoid growing cache size indefinitely
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Deploy to Cloud Run
+        env:
+          IMAGE_TAG: ${{ env.VERSION }}
+          REGISTRY: ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPOSITORY }}
+        run: |
+          IMAGE_URI="$REGISTRY/${{ inputs.service_name }}:$IMAGE_TAG"
+          FULL_SHA="${{ github.sha }}"
+          
+          gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
+            --image=$IMAGE_URI \
+            --region=${{ env.GCP_REGION }} \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=${{ inputs.expose_port }} \
+            --set-env-vars="APP_VERSION=$VERSION,GIT_COMMIT_SHA=$FULL_SHA,ENVIRONMENT=$ENVIRONMENT" \
+            --min-instances=0 \
+            --max-instances=10 \
+            --memory=512Mi \
+            --cpu=1 \
+            --timeout=300 \
+            --concurrency=80 \
+            --quiet
+
+      - name: Get Cloud Run URL
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
+            --region=${{ env.GCP_REGION }} \
+            --format='value(status.url)')
+          
+          echo "✅ Deployment completed successfully!"
+          echo "Service: ${{ inputs.service_name }}"
+          echo "Version: $VERSION"
+          echo "Image: ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPOSITORY }}/${{ inputs.service_name }}:$VERSION"
+          echo "URL: $SERVICE_URL"
