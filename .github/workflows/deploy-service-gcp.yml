@@ -66,11 +66,6 @@ on:
         type: boolean
         default: false
         description: 'Se o serviço usa Clerk JWT public key (monta secret clerk-jwt-public-key)'
-      update_eureka_url_secret:
-        required: false
-        type: boolean
-        default: false
-        description: 'Se true, atualiza o secret eureka-url no Secret Manager com a URL do serviço após deploy'
       extra_env_vars:
         required: false
         type: string
@@ -180,12 +175,6 @@ jobs:
             echo "Created service account: $SA_EMAIL"
           fi
 
-          # Secret accessor for eureka-url (all services need it)
-          gcloud secrets add-iam-policy-binding eureka-url \
-            --member="serviceAccount:$SA_EMAIL" \
-            --role="roles/secretmanager.secretAccessor" \
-            --project=$GCP_PROJECT_ID --quiet 2>/dev/null || true
-
           # Database: secret accessor for db-password + Cloud SQL client
           if [ -n "${{ inputs.database_name }}" ]; then
             gcloud secrets add-iam-policy-binding ${{ inputs.db_password_secret_name }} \
@@ -239,19 +228,19 @@ jobs:
 
           # --- Build env vars ---
           ENV_VARS="SPRING_PROFILES_ACTIVE=$ENVIRONMENT,gcp"
-          ENV_VARS="$ENV_VARS,SERVER_PORT=${{ inputs.expose_port }}"
-          ENV_VARS="$ENV_VARS,APP_VERSION=$VERSION"
-          ENV_VARS="$ENV_VARS,GIT_COMMIT_SHA=${{ github.sha }}"
+          ENV_VARS="$ENV_VARS;;SERVER_PORT=${{ inputs.expose_port }}"
+          ENV_VARS="$ENV_VARS;;APP_VERSION=$VERSION"
+          ENV_VARS="$ENV_VARS;;GIT_COMMIT_SHA=${{ github.sha }}"
 
           # Database
           if [ -n "${{ inputs.database_name }}" ]; then
-            ENV_VARS="$ENV_VARS,SPRING_DATASOURCE_URL=jdbc:postgresql://${DB_HOST}:5432/${{ inputs.database_name }}"
-            ENV_VARS="$ENV_VARS,SPRING_DATASOURCE_USERNAME=${DB_USER}"
+            ENV_VARS="$ENV_VARS;;SPRING_DATASOURCE_URL=jdbc:postgresql://${DB_HOST}:5432/${{ inputs.database_name }}"
+            ENV_VARS="$ENV_VARS;;SPRING_DATASOURCE_USERNAME=${DB_USER}"
           fi
 
           # Redis
-          ENV_VARS="$ENV_VARS,SPRING_DATA_REDIS_HOST=${REDIS_HOST}"
-          ENV_VARS="$ENV_VARS,SPRING_DATA_REDIS_PORT=6379"
+          ENV_VARS="$ENV_VARS;;SPRING_DATA_REDIS_HOST=${REDIS_HOST}"
+          ENV_VARS="$ENV_VARS;;SPRING_DATA_REDIS_PORT=6379"
 
           # RabbitMQ (from secrets)
           if [ "${{ inputs.use_rabbitmq }}" = "true" ]; then
@@ -259,16 +248,16 @@ jobs:
             RABBITMQ_USERNAME=$(gcloud secrets versions access latest --secret=rabbitmq-username --project=$GCP_PROJECT_ID)
             RABBITMQ_PASSWORD=$(gcloud secrets versions access latest --secret=rabbitmq-password --project=$GCP_PROJECT_ID)
             RABBITMQ_VHOST=$(gcloud secrets versions access latest --secret=rabbitmq-vhost --project=$GCP_PROJECT_ID)
-            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_HOST=${RABBITMQ_HOST}"
-            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_PORT=5671"
-            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_USERNAME=${RABBITMQ_USERNAME}"
-            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}"
-            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_VIRTUAL_HOST=${RABBITMQ_VHOST}"
-            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_SSL_ENABLED=true"
+            ENV_VARS="$ENV_VARS;;SPRING_RABBITMQ_HOST=${RABBITMQ_HOST}"
+            ENV_VARS="$ENV_VARS;;SPRING_RABBITMQ_PORT=5671"
+            ENV_VARS="$ENV_VARS;;SPRING_RABBITMQ_USERNAME=${RABBITMQ_USERNAME}"
+            ENV_VARS="$ENV_VARS;;SPRING_RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}"
+            ENV_VARS="$ENV_VARS;;SPRING_RABBITMQ_VIRTUAL_HOST=${RABBITMQ_VHOST}"
+            ENV_VARS="$ENV_VARS;;SPRING_RABBITMQ_SSL_ENABLED=true"
           fi
 
-          # Service discovery — Cloud Run uses direct URLs instead of Eureka
-          # Resolve Cloud Run URLs for all services (used by api-gateway routes and Feign clients)
+          # Service discovery — resolve Cloud Run URLs for all services
+          # Used by api-gateway routes and Feign clients for direct service-to-service communication
           SERVICES="company-service conhecimento-service documentos-service financeiro-service coletas-service master-data comercial-service manifestos-service emissor-service mobile-bff-service tenant-service fiscal-service contabilidade-service averbacao-service relatorio-service"
           for SVC in $SERVICES; do
             SVC_URL=$(gcloud run services describe $SVC \
@@ -277,7 +266,7 @@ jobs:
             if [ -n "$SVC_URL" ]; then
               # Convert service-name to ENV_VAR_NAME (e.g. company-service -> COMPANY_SERVICE_URL)
               ENV_NAME=$(echo "${SVC}" | tr '[:lower:]-' '[:upper:]_')_URL
-              ENV_VARS="$ENV_VARS,${ENV_NAME}=${SVC_URL}"
+              ENV_VARS="$ENV_VARS;;${ENV_NAME}=${SVC_URL}"
               echo "Resolved $SVC -> $SVC_URL"
             fi
           done
@@ -285,30 +274,30 @@ jobs:
           # MongoDB
           if [ -n "${{ inputs.mongodb_database }}" ]; then
             MONGODB_URI_BASE=$(gcloud secrets versions access latest --secret=mongodb-uri-base --project=$GCP_PROJECT_ID)
-            ENV_VARS="$ENV_VARS,SPRING_DATA_MONGODB_URI=${MONGODB_URI_BASE}/${{ inputs.mongodb_database }}"
+            ENV_VARS="$ENV_VARS;;SPRING_DATA_MONGODB_URI=${MONGODB_URI_BASE}/${{ inputs.mongodb_database }}"
           fi
 
           # Storage
           if [ "${{ inputs.use_storage }}" = "true" ]; then
             STORAGE_BUCKET=$(gcloud secrets versions access latest --secret=storage-bucket --project=$GCP_PROJECT_ID)
             STORAGE_PUBLIC_URL=$(gcloud secrets versions access latest --secret=storage-public-url --project=$GCP_PROJECT_ID)
-            ENV_VARS="$ENV_VARS,AWS_S3_BUCKET=${STORAGE_BUCKET}"
-            ENV_VARS="$ENV_VARS,AWS_S3_PUBLIC_URL=${STORAGE_PUBLIC_URL}"
+            ENV_VARS="$ENV_VARS;;AWS_S3_BUCKET=${STORAGE_BUCKET}"
+            ENV_VARS="$ENV_VARS;;AWS_S3_PUBLIC_URL=${STORAGE_PUBLIC_URL}"
           fi
 
           # OpenTelemetry → Datadog Agent (only when agent URL is available)
           if [ -n "$DATADOG_AGENT_URL" ]; then
-            ENV_VARS="$ENV_VARS,OTEL_TRACING_ENABLED=true"
-            ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=${DATADOG_AGENT_URL}/v1/metrics"
-            ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${DATADOG_AGENT_URL}/v1/traces"
-            ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=${DATADOG_AGENT_URL}/v1/logs"
+            ENV_VARS="$ENV_VARS;;OTEL_TRACING_ENABLED=true"
+            ENV_VARS="$ENV_VARS;;OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=${DATADOG_AGENT_URL}/v1/metrics"
+            ENV_VARS="$ENV_VARS;;OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${DATADOG_AGENT_URL}/v1/traces"
+            ENV_VARS="$ENV_VARS;;OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=${DATADOG_AGENT_URL}/v1/logs"
           fi
-          ENV_VARS="$ENV_VARS,DD_ENV=$ENVIRONMENT"
-          ENV_VARS="$ENV_VARS,DD_SERVICE=${{ inputs.service_name }}"
+          ENV_VARS="$ENV_VARS;;DD_ENV=$ENVIRONMENT"
+          ENV_VARS="$ENV_VARS;;DD_SERVICE=${{ inputs.service_name }}"
 
           # Extra env vars
           if [ -n "${{ inputs.extra_env_vars }}" ]; then
-            ENV_VARS="$ENV_VARS,${{ inputs.extra_env_vars }}"
+            ENV_VARS="$ENV_VARS;;${{ inputs.extra_env_vars }}"
           fi
 
           # --- Build secrets for --set-secrets (native Secret Manager mount) ---
@@ -361,7 +350,7 @@ jobs:
             --timeout=300 \
             --cpu-boost \
             --startup-probe="httpGet.path=/actuator/health,httpGet.port=${{ inputs.expose_port }},initialDelaySeconds=10,timeoutSeconds=10,periodSeconds=10,failureThreshold=20" \
-            --set-env-vars="$ENV_VARS" \
+            --set-env-vars="^;;^$ENV_VARS" \
             $SECRETS_FLAG \
             --allow-unauthenticated \
             --quiet
@@ -376,13 +365,3 @@ jobs:
           echo "Version: ${{ env.VERSION }}"
           echo "URL: $SERVICE_URL"
 
-      - name: Update eureka-url secret
-        if: inputs.update_eureka_url_secret
-        run: |
-          SERVICE_URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
-            --region=${{ env.GCP_REGION }} \
-            --format='value(status.url)')
-          echo "Updating eureka-url secret to: $SERVICE_URL"
-          echo -n "$SERVICE_URL" | gcloud secrets versions add eureka-url \
-            --project=${{ env.GCP_PROJECT_ID }} \
-            --data-file=-
