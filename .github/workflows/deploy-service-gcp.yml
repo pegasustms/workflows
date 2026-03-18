@@ -36,6 +36,11 @@ on:
         type: string
         default: '512Mi'
         description: 'Memory allocation'
+      ingress:
+        required: false
+        type: string
+        default: 'internal'
+        description: 'Cloud Run ingress setting (internal or all)'
       use_rabbitmq:
         required: false
         type: boolean
@@ -56,6 +61,16 @@ on:
         type: boolean
         default: false
         description: 'Se o serviço usa Clerk (monta secrets clerk-secret-key e clerk-webhook-signing-secret)'
+      use_clerk_jwt:
+        required: false
+        type: boolean
+        default: false
+        description: 'Se o serviço usa Clerk JWT public key (monta secret clerk-jwt-public-key)'
+      update_eureka_url_secret:
+        required: false
+        type: boolean
+        default: false
+        description: 'Se true, atualiza o secret eureka-url no Secret Manager com a URL do serviço após deploy'
       extra_env_vars:
         required: false
         type: string
@@ -152,6 +167,62 @@ jobs:
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
+      - name: Ensure Service Account and IAM permissions
+        run: |
+          SA_NAME="${{ inputs.service_name }}-sa"
+          SA_EMAIL="${SA_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+
+          # Create SA if it doesn't exist
+          if ! gcloud iam service-accounts describe "$SA_EMAIL" --project=$GCP_PROJECT_ID &>/dev/null; then
+            gcloud iam service-accounts create "$SA_NAME" \
+              --display-name="Service Account for ${{ inputs.service_name }}" \
+              --project=$GCP_PROJECT_ID
+            echo "Created service account: $SA_EMAIL"
+          fi
+
+          # Secret accessor for eureka-url (all services need it)
+          gcloud secrets add-iam-policy-binding eureka-url \
+            --member="serviceAccount:$SA_EMAIL" \
+            --role="roles/secretmanager.secretAccessor" \
+            --project=$GCP_PROJECT_ID --quiet 2>/dev/null || true
+
+          # Database: secret accessor for db-password + Cloud SQL client
+          if [ -n "${{ inputs.database_name }}" ]; then
+            gcloud secrets add-iam-policy-binding ${{ inputs.db_password_secret_name }} \
+              --member="serviceAccount:$SA_EMAIL" \
+              --role="roles/secretmanager.secretAccessor" \
+              --project=$GCP_PROJECT_ID --quiet 2>/dev/null || true
+
+            gcloud projects add-iam-policy-binding $GCP_PROJECT_ID \
+              --member="serviceAccount:$SA_EMAIL" \
+              --role="roles/cloudsql.client" --quiet 2>/dev/null || true
+          fi
+
+          # Clerk secrets
+          if [ "${{ inputs.use_clerk }}" = "true" ]; then
+            for SECRET in clerk-secret-key clerk-webhook-signing-secret; do
+              gcloud secrets add-iam-policy-binding $SECRET \
+                --member="serviceAccount:$SA_EMAIL" \
+                --role="roles/secretmanager.secretAccessor" \
+                --project=$GCP_PROJECT_ID --quiet 2>/dev/null || true
+            done
+          fi
+
+          # Clerk JWT public key
+          if [ "${{ inputs.use_clerk_jwt }}" = "true" ]; then
+            gcloud secrets add-iam-policy-binding clerk-jwt-public-key \
+              --member="serviceAccount:$SA_EMAIL" \
+              --role="roles/secretmanager.secretAccessor" \
+              --project=$GCP_PROJECT_ID --quiet 2>/dev/null || true
+          fi
+
+          # Storage
+          if [ "${{ inputs.use_storage }}" = "true" ]; then
+            gcloud projects add-iam-policy-binding $GCP_PROJECT_ID \
+              --member="serviceAccount:$SA_EMAIL" \
+              --role="roles/storage.objectAdmin" --quiet 2>/dev/null || true
+          fi
+
       - name: Deploy to Cloud Run
         env:
           IMAGE_TAG: ${{ env.VERSION }}
@@ -197,10 +268,17 @@ jobs:
             ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_SSL_ENABLED=true"
           fi
 
-          # Eureka
+          # Eureka - hostname is resolved from existing service URL or updated post-deploy
           ENV_VARS="$ENV_VARS,EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=${EUREKA_URL}/eureka/"
-          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_HOSTNAME=${{ inputs.service_name }}.${{ env.GCP_REGION }}.run.app"
-          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_PREFER_IP_ADDRESS=false"
+          EXISTING_URL=$(gcloud run services describe ${{ inputs.service_name }} \
+            --region=${{ env.GCP_REGION }} --project=$GCP_PROJECT_ID \
+            --format='value(status.url)' 2>/dev/null || echo "")
+          if [ -n "$EXISTING_URL" ]; then
+            EUREKA_HOSTNAME=$(echo "$EXISTING_URL" | sed 's|https://||')
+          else
+            EUREKA_HOSTNAME="${{ inputs.service_name }}.placeholder.run.app"
+          fi
+          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_HOSTNAME=${EUREKA_HOSTNAME}"
 
           # MongoDB
           if [ -n "${{ inputs.mongodb_database }}" ]; then
@@ -240,6 +318,12 @@ jobs:
             SECRETS="${SECRETS}CLERK_SECRET_KEY=clerk-secret-key:latest,CLERK_WEBHOOK_SIGNING_SECRET=clerk-webhook-signing-secret:latest"
           fi
 
+          # Clerk JWT public key (api-gateway)
+          if [ "${{ inputs.use_clerk_jwt }}" = "true" ]; then
+            [ -n "$SECRETS" ] && SECRETS="$SECRETS,"
+            SECRETS="${SECRETS}CLERK_JWT_PUBLIC_KEY=clerk-jwt-public-key:latest"
+          fi
+
           SECRETS_FLAG=""
           if [ -n "$SECRETS" ]; then
             SECRETS_FLAG="--set-secrets=$SECRETS"
@@ -253,15 +337,18 @@ jobs:
             --limit=1)
 
           # --- Deploy ---
+          SERVICE_ACCOUNT="${{ inputs.service_name }}-sa@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+
           gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
             --image=$IMAGE_URI \
             --region=${{ env.GCP_REGION }} \
             --project=$GCP_PROJECT_ID \
             --platform=managed \
+            --service-account=$SERVICE_ACCOUNT \
             --port=${{ inputs.expose_port }} \
             --cpu=${{ inputs.cpu }} \
             --memory=${{ inputs.memory }} \
-            --ingress=internal \
+            --ingress=${{ inputs.ingress }} \
             --vpc-connector=$VPC_CONNECTOR \
             --vpc-egress=all-traffic \
             --min-instances=0 \
@@ -272,13 +359,32 @@ jobs:
             --allow-unauthenticated \
             --quiet
 
-      - name: Get Cloud Run URL
+      - name: Update Eureka hostname with real Cloud Run URL
         run: |
           SERVICE_URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
             --region=${{ env.GCP_REGION }} \
             --format='value(status.url)')
+          EUREKA_HOSTNAME=$(echo "$SERVICE_URL" | sed 's|https://||')
+
+          echo "Updating EUREKA_INSTANCE_HOSTNAME to: $EUREKA_HOSTNAME"
+          gcloud run services update ${{ env.CLOUD_RUN_SERVICE }} \
+            --region=${{ env.GCP_REGION }} \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --update-env-vars="EUREKA_INSTANCE_HOSTNAME=${EUREKA_HOSTNAME}" \
+            --quiet
 
           echo "Deployment completed successfully!"
           echo "Service: ${{ inputs.service_name }}"
-          echo "Version: $VERSION"
+          echo "Version: ${{ env.VERSION }}"
           echo "URL: $SERVICE_URL"
+
+      - name: Update eureka-url secret
+        if: inputs.update_eureka_url_secret
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
+            --region=${{ env.GCP_REGION }} \
+            --format='value(status.url)')
+          echo "Updating eureka-url secret to: $SERVICE_URL"
+          echo -n "$SERVICE_URL" | gcloud secrets versions add eureka-url \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --data-file=-
