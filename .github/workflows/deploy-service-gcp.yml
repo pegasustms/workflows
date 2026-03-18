@@ -46,6 +46,11 @@ on:
         type: boolean
         default: false
         description: 'Se o serviço usa Cloud Storage'
+      use_clerk:
+        required: false
+        type: boolean
+        default: false
+        description: 'Se o serviço usa Clerk (monta secrets clerk-secret-key e clerk-webhook-signing-secret)'
       extra_env_vars:
         required: false
         type: string
@@ -218,10 +223,21 @@ jobs:
             ENV_VARS="$ENV_VARS,${{ inputs.extra_env_vars }}"
           fi
 
-          # --- Build secrets for --set-secrets (DB password via native Secret Manager mount) ---
-          SECRETS_FLAG=""
+          # --- Build secrets for --set-secrets (native Secret Manager mount) ---
+          SECRETS=""
           if [ -n "${{ inputs.database_name }}" ]; then
-            SECRETS_FLAG="--set-secrets=SPRING_DATASOURCE_PASSWORD=db-password:latest"
+            SECRETS="SPRING_DATASOURCE_PASSWORD=db-password:latest"
+          fi
+
+          # Clerk secrets
+          if [ "${{ inputs.use_clerk }}" = "true" ]; then
+            [ -n "$SECRETS" ] && SECRETS="$SECRETS,"
+            SECRETS="${SECRETS}CLERK_SECRET_KEY=clerk-secret-key:latest,CLERK_WEBHOOK_SIGNING_SECRET=clerk-webhook-signing-secret:latest"
+          fi
+
+          SECRETS_FLAG=""
+          if [ -n "$SECRETS" ]; then
+            SECRETS_FLAG="--set-secrets=$SECRETS"
           fi
 
           # --- Get VPC Connector ---
