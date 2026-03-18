@@ -279,6 +279,10 @@ jobs:
             EUREKA_HOSTNAME="${{ inputs.service_name }}.placeholder.run.app"
           fi
           ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_HOSTNAME=${EUREKA_HOSTNAME}"
+          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_PREFER_IP_ADDRESS=false"
+          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_NON_SECURE_PORT_ENABLED=false"
+          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_SECURE_PORT_ENABLED=true"
+          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_SECURE_PORT=443"
 
           # MongoDB
           if [ -n "${{ inputs.mongodb_database }}" ]; then
