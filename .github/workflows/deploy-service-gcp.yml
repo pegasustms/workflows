@@ -21,6 +21,11 @@ on:
         type: string
         default: ''
         description: 'Nome do banco de dados (vazio se não usa DB)'
+      db_password_secret_name:
+        required: false
+        type: string
+        default: 'pegasus-dev-db-password'
+        description: 'Nome do secret no Secret Manager para a senha do banco'
       cpu:
         required: false
         type: string
@@ -226,7 +231,7 @@ jobs:
           # --- Build secrets for --set-secrets (native Secret Manager mount) ---
           SECRETS=""
           if [ -n "${{ inputs.database_name }}" ]; then
-            SECRETS="SPRING_DATASOURCE_PASSWORD=db-password:latest"
+            SECRETS="SPRING_DATASOURCE_PASSWORD=${{ inputs.db_password_secret_name }}:latest"
           fi
 
           # Clerk secrets
