@@ -235,11 +235,10 @@ jobs:
           DB_USER=$(gcloud secrets versions access latest --secret=db-user --project=$GCP_PROJECT_ID 2>/dev/null || echo "")
           DB_PASSWORD_SECRET="projects/$GCP_PROJECT_ID/secrets/db-password/versions/latest"
           REDIS_HOST=$(gcloud secrets versions access latest --secret=redis-host --project=$GCP_PROJECT_ID 2>/dev/null || echo "")
-          EUREKA_URL=$(gcloud secrets versions access latest --secret=eureka-url --project=$GCP_PROJECT_ID 2>/dev/null || echo "")
           DATADOG_AGENT_URL=$(gcloud secrets versions access latest --secret=datadog-agent-url --project=$GCP_PROJECT_ID 2>/dev/null || echo "")
 
           # --- Build env vars ---
-          ENV_VARS="SPRING_PROFILES_ACTIVE=$ENVIRONMENT"
+          ENV_VARS="SPRING_PROFILES_ACTIVE=$ENVIRONMENT,gcp"
           ENV_VARS="$ENV_VARS,SERVER_PORT=${{ inputs.expose_port }}"
           ENV_VARS="$ENV_VARS,APP_VERSION=$VERSION"
           ENV_VARS="$ENV_VARS,GIT_COMMIT_SHA=${{ github.sha }}"
@@ -268,21 +267,20 @@ jobs:
             ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_SSL_ENABLED=true"
           fi
 
-          # Eureka - hostname is resolved from existing service URL or updated post-deploy
-          ENV_VARS="$ENV_VARS,EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=${EUREKA_URL}/eureka/"
-          EXISTING_URL=$(gcloud run services describe ${{ inputs.service_name }} \
-            --region=${{ env.GCP_REGION }} --project=$GCP_PROJECT_ID \
-            --format='value(status.url)' 2>/dev/null || echo "")
-          if [ -n "$EXISTING_URL" ]; then
-            EUREKA_HOSTNAME=$(echo "$EXISTING_URL" | sed 's|https://||')
-          else
-            EUREKA_HOSTNAME="${{ inputs.service_name }}.placeholder.run.app"
-          fi
-          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_HOSTNAME=${EUREKA_HOSTNAME}"
-          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_PREFER_IP_ADDRESS=false"
-          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_NON_SECURE_PORT_ENABLED=false"
-          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_SECURE_PORT_ENABLED=true"
-          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_SECURE_PORT=443"
+          # Service discovery — Cloud Run uses direct URLs instead of Eureka
+          # Resolve Cloud Run URLs for all services (used by api-gateway routes and Feign clients)
+          SERVICES="company-service conhecimento-service documentos-service financeiro-service coletas-service master-data comercial-service manifestos-service emissor-service mobile-bff-service tenant-service fiscal-service contabilidade-service averbacao-service relatorio-service"
+          for SVC in $SERVICES; do
+            SVC_URL=$(gcloud run services describe $SVC \
+              --region=${{ env.GCP_REGION }} --project=$GCP_PROJECT_ID \
+              --format='value(status.url)' 2>/dev/null || echo "")
+            if [ -n "$SVC_URL" ]; then
+              # Convert service-name to ENV_VAR_NAME (e.g. company-service -> COMPANY_SERVICE_URL)
+              ENV_NAME=$(echo "${SVC}" | tr '[:lower:]-' '[:upper:]_')_URL
+              ENV_VARS="$ENV_VARS,${ENV_NAME}=${SVC_URL}"
+              echo "Resolved $SVC -> $SVC_URL"
+            fi
+          done
 
           # MongoDB
           if [ -n "${{ inputs.mongodb_database }}" ]; then
@@ -368,20 +366,11 @@ jobs:
             --allow-unauthenticated \
             --quiet
 
-      - name: Update Eureka hostname with real Cloud Run URL
+      - name: Print deployment info
         run: |
           SERVICE_URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
             --region=${{ env.GCP_REGION }} \
             --format='value(status.url)')
-          EUREKA_HOSTNAME=$(echo "$SERVICE_URL" | sed 's|https://||')
-
-          echo "Updating EUREKA_INSTANCE_HOSTNAME to: $EUREKA_HOSTNAME"
-          gcloud run services update ${{ env.CLOUD_RUN_SERVICE }} \
-            --region=${{ env.GCP_REGION }} \
-            --project=${{ env.GCP_PROJECT_ID }} \
-            --update-env-vars="EUREKA_INSTANCE_HOSTNAME=${EUREKA_HOSTNAME}" \
-            --quiet
-
           echo "Deployment completed successfully!"
           echo "Service: ${{ inputs.service_name }}"
           echo "Version: ${{ env.VERSION }}"
