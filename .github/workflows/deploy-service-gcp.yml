@@ -6,7 +6,7 @@ on:
       service_name:
         required: true
         type: string
-        description: 'Nome do serviço (ex: *-service)'
+        description: 'Nome do serviço (ex: conhecimento-service)'
       artifact_registry_repository:
         required: true
         type: string
@@ -16,11 +16,41 @@ on:
         type: string
         default: '8080'
         description: 'Porta exposta pelo serviço'
-      allow_unauthenticated:
+      database_name:
+        required: false
+        type: string
+        default: ''
+        description: 'Nome do banco de dados (vazio se não usa DB)'
+      cpu:
+        required: false
+        type: string
+        default: '1'
+        description: 'CPU allocation'
+      memory:
+        required: false
+        type: string
+        default: '512Mi'
+        description: 'Memory allocation'
+      use_rabbitmq:
+        required: false
+        type: boolean
+        default: true
+        description: 'Se o serviço usa RabbitMQ'
+      mongodb_database:
+        required: false
+        type: string
+        default: ''
+        description: 'Nome do banco MongoDB (ex: averbacao_service, emissor_service, relatorio_service). Vazio se não usa MongoDB'
+      use_storage:
         required: false
         type: boolean
         default: false
-        description: 'Permitir acesso público não autenticado (apenas api-gateway)'
+        description: 'Se o serviço usa Cloud Storage'
+      extra_env_vars:
+        required: false
+        type: string
+        default: ''
+        description: 'Env vars extras no formato KEY=VALUE,KEY2=VALUE2'
     secrets:
       GCP_PROJECT_ID:
         required: true
@@ -36,7 +66,7 @@ jobs:
     name: Build & Deploy ${{ inputs.service_name }}
     runs-on: ubuntu-latest
     environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
-    
+
     permissions:
       contents: read
       id-token: write
@@ -108,8 +138,7 @@ jobs:
             -t $REGISTRY/${{ inputs.service_name }}:latest \
             --push \
             .
-          
-          # Move cache to avoid growing cache size indefinitely
+
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
@@ -119,32 +148,116 @@ jobs:
           REGISTRY: ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPOSITORY }}
         run: |
           IMAGE_URI="$REGISTRY/${{ inputs.service_name }}:$IMAGE_TAG"
-          FULL_SHA="${{ github.sha }}"
-          
-          # Update only the image, preserving all other configuration from Terraform
-          gcloud run services update ${{ env.CLOUD_RUN_SERVICE }} \
+
+          # --- Read secrets from Secret Manager ---
+          DB_HOST=$(gcloud secrets versions access latest --secret=db-host --project=$GCP_PROJECT_ID 2>/dev/null || echo "")
+          DB_USER=$(gcloud secrets versions access latest --secret=db-user --project=$GCP_PROJECT_ID 2>/dev/null || echo "")
+          DB_PASSWORD_SECRET="projects/$GCP_PROJECT_ID/secrets/db-password/versions/latest"
+          REDIS_HOST=$(gcloud secrets versions access latest --secret=redis-host --project=$GCP_PROJECT_ID 2>/dev/null || echo "")
+          EUREKA_URL=$(gcloud secrets versions access latest --secret=eureka-url --project=$GCP_PROJECT_ID 2>/dev/null || echo "")
+          DATADOG_AGENT_URL=$(gcloud secrets versions access latest --secret=datadog-agent-url --project=$GCP_PROJECT_ID 2>/dev/null || echo "")
+
+          # --- Build env vars ---
+          ENV_VARS="SPRING_PROFILES_ACTIVE=$ENVIRONMENT"
+          ENV_VARS="$ENV_VARS,SERVER_PORT=${{ inputs.expose_port }}"
+          ENV_VARS="$ENV_VARS,APP_VERSION=$VERSION"
+          ENV_VARS="$ENV_VARS,GIT_COMMIT_SHA=${{ github.sha }}"
+
+          # Database
+          if [ -n "${{ inputs.database_name }}" ]; then
+            ENV_VARS="$ENV_VARS,SPRING_DATASOURCE_URL=jdbc:postgresql://${DB_HOST}:5432/${{ inputs.database_name }}"
+            ENV_VARS="$ENV_VARS,SPRING_DATASOURCE_USERNAME=${DB_USER}"
+          fi
+
+          # Redis
+          ENV_VARS="$ENV_VARS,SPRING_DATA_REDIS_HOST=${REDIS_HOST}"
+          ENV_VARS="$ENV_VARS,SPRING_DATA_REDIS_PORT=6379"
+
+          # RabbitMQ (from secrets)
+          if [ "${{ inputs.use_rabbitmq }}" = "true" ]; then
+            RABBITMQ_HOST=$(gcloud secrets versions access latest --secret=rabbitmq-host --project=$GCP_PROJECT_ID)
+            RABBITMQ_USERNAME=$(gcloud secrets versions access latest --secret=rabbitmq-username --project=$GCP_PROJECT_ID)
+            RABBITMQ_PASSWORD=$(gcloud secrets versions access latest --secret=rabbitmq-password --project=$GCP_PROJECT_ID)
+            RABBITMQ_VHOST=$(gcloud secrets versions access latest --secret=rabbitmq-vhost --project=$GCP_PROJECT_ID)
+            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_HOST=${RABBITMQ_HOST}"
+            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_PORT=5671"
+            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_USERNAME=${RABBITMQ_USERNAME}"
+            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}"
+            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_VIRTUAL_HOST=${RABBITMQ_VHOST}"
+            ENV_VARS="$ENV_VARS,SPRING_RABBITMQ_SSL_ENABLED=true"
+          fi
+
+          # Eureka
+          ENV_VARS="$ENV_VARS,EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=${EUREKA_URL}/eureka/"
+          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_HOSTNAME=${{ inputs.service_name }}.${{ env.GCP_REGION }}.run.app"
+          ENV_VARS="$ENV_VARS,EUREKA_INSTANCE_PREFER_IP_ADDRESS=false"
+
+          # MongoDB
+          if [ -n "${{ inputs.mongodb_database }}" ]; then
+            MONGODB_URI_BASE=$(gcloud secrets versions access latest --secret=mongodb-uri-base --project=$GCP_PROJECT_ID)
+            ENV_VARS="$ENV_VARS,SPRING_DATA_MONGODB_URI=${MONGODB_URI_BASE}/${{ inputs.mongodb_database }}"
+          fi
+
+          # Storage
+          if [ "${{ inputs.use_storage }}" = "true" ]; then
+            STORAGE_BUCKET=$(gcloud secrets versions access latest --secret=storage-bucket --project=$GCP_PROJECT_ID)
+            STORAGE_PUBLIC_URL=$(gcloud secrets versions access latest --secret=storage-public-url --project=$GCP_PROJECT_ID)
+            ENV_VARS="$ENV_VARS,AWS_S3_BUCKET=${STORAGE_BUCKET}"
+            ENV_VARS="$ENV_VARS,AWS_S3_PUBLIC_URL=${STORAGE_PUBLIC_URL}"
+          fi
+
+          # OpenTelemetry → Datadog Agent
+          ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=${DATADOG_AGENT_URL}/v1/metrics"
+          ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${DATADOG_AGENT_URL}/v1/traces"
+          ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=${DATADOG_AGENT_URL}/v1/logs"
+          ENV_VARS="$ENV_VARS,DD_ENV=$ENVIRONMENT"
+          ENV_VARS="$ENV_VARS,DD_SERVICE=${{ inputs.service_name }}"
+
+          # Extra env vars
+          if [ -n "${{ inputs.extra_env_vars }}" ]; then
+            ENV_VARS="$ENV_VARS,${{ inputs.extra_env_vars }}"
+          fi
+
+          # --- Build secrets for --set-secrets (DB password via native Secret Manager mount) ---
+          SECRETS_FLAG=""
+          if [ -n "${{ inputs.database_name }}" ]; then
+            SECRETS_FLAG="--set-secrets=SPRING_DATASOURCE_PASSWORD=db-password:latest"
+          fi
+
+          # --- Get VPC Connector ---
+          VPC_CONNECTOR=$(gcloud compute networks vpc-access connectors list \
+            --region=${{ env.GCP_REGION }} \
+            --project=$GCP_PROJECT_ID \
+            --format='value(name)' \
+            --limit=1)
+
+          # --- Deploy ---
+          gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
             --image=$IMAGE_URI \
             --region=${{ env.GCP_REGION }} \
-            --update-env-vars="APP_VERSION=$VERSION,GIT_COMMIT_SHA=$FULL_SHA" \
+            --project=$GCP_PROJECT_ID \
+            --platform=managed \
+            --port=${{ inputs.expose_port }} \
+            --cpu=${{ inputs.cpu }} \
+            --memory=${{ inputs.memory }} \
+            --ingress=internal \
+            --vpc-connector=$VPC_CONNECTOR \
+            --vpc-egress=all-traffic \
+            --min-instances=0 \
+            --max-instances=10 \
+            --timeout=300 \
+            --set-env-vars="$ENV_VARS" \
+            $SECRETS_FLAG \
+            --allow-unauthenticated \
             --quiet
-          
-          # Update IAM policy only if specified (for api-gateway)
-          if [ "${{ inputs.allow_unauthenticated }}" = "true" ]; then
-            gcloud run services add-iam-policy-binding ${{ env.CLOUD_RUN_SERVICE }} \
-              --region=${{ env.GCP_REGION }} \
-              --member="allUsers" \
-              --role="roles/run.invoker" \
-              --quiet || true
-          fi
 
       - name: Get Cloud Run URL
         run: |
           SERVICE_URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
             --region=${{ env.GCP_REGION }} \
             --format='value(status.url)')
-          
-          echo "✅ Deployment completed successfully!"
+
+          echo "Deployment completed successfully!"
           echo "Service: ${{ inputs.service_name }}"
           echo "Version: $VERSION"
-          echo "Image: ${{ env.ARTIFACT_REGISTRY_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPOSITORY }}/${{ inputs.service_name }}:$VERSION"
           echo "URL: $SERVICE_URL"
