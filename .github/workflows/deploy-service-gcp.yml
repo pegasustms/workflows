@@ -340,7 +340,7 @@ jobs:
             --limit=1)
 
           # --- Deploy ---
-          SERVICE_ACCOUNT="${{ inputs.service_name }}-sa@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+          SERVICE_ACCOUNT="${{ secrets.GCP_SERVICE_ACCOUNT }}"
 
           gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
             --image=$IMAGE_URI \
