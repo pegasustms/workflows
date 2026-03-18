@@ -294,10 +294,13 @@ jobs:
             ENV_VARS="$ENV_VARS,AWS_S3_PUBLIC_URL=${STORAGE_PUBLIC_URL}"
           fi
 
-          # OpenTelemetry → Datadog Agent
-          ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=${DATADOG_AGENT_URL}/v1/metrics"
-          ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${DATADOG_AGENT_URL}/v1/traces"
-          ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=${DATADOG_AGENT_URL}/v1/logs"
+          # OpenTelemetry → Datadog Agent (only when agent URL is available)
+          if [ -n "$DATADOG_AGENT_URL" ]; then
+            ENV_VARS="$ENV_VARS,OTEL_TRACING_ENABLED=true"
+            ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=${DATADOG_AGENT_URL}/v1/metrics"
+            ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${DATADOG_AGENT_URL}/v1/traces"
+            ENV_VARS="$ENV_VARS,OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=${DATADOG_AGENT_URL}/v1/logs"
+          fi
           ENV_VARS="$ENV_VARS,DD_ENV=$ENVIRONMENT"
           ENV_VARS="$ENV_VARS,DD_SERVICE=${{ inputs.service_name }}"
 
