@@ -340,7 +340,8 @@ jobs:
             --max-instances=10 \
             --timeout=300 \
             --cpu-boost \
-            --startup-probe="httpGet.path=/actuator/health,httpGet.port=${{ inputs.expose_port }},initialDelaySeconds=10,timeoutSeconds=10,periodSeconds=10,failureThreshold=20" \
+            --startup-probe="httpGet.path=/actuator/health/liveness,httpGet.port=${{ inputs.expose_port }},initialDelaySeconds=0,timeoutSeconds=5,periodSeconds=5,failureThreshold=30" \
+            --liveness-probe="httpGet.path=/actuator/health/liveness,httpGet.port=${{ inputs.expose_port }},initialDelaySeconds=0,timeoutSeconds=5,periodSeconds=30,failureThreshold=3" \
             --set-env-vars="^;;^$ENV_VARS" \
             $SECRETS_FLAG \
             --allow-unauthenticated \
