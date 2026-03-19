@@ -256,20 +256,11 @@ jobs:
             ENV_VARS="$ENV_VARS;;SPRING_RABBITMQ_SSL_ENABLED=true"
           fi
 
-          # Service discovery — resolve Cloud Run URLs for all services
-          # Used by api-gateway routes and Feign clients for direct service-to-service communication
-          SERVICES="company-service conhecimento-service documentos-service financeiro-service coletas-service master-data comercial-service manifestos-service emissor-service mobile-bff-service tenant-service fiscal-service contabilidade-service averbacao-service relatorio-service"
-          for SVC in $SERVICES; do
-            SVC_URL=$(gcloud run services describe $SVC \
-              --region=${{ env.GCP_REGION }} --project=$GCP_PROJECT_ID \
-              --format='value(status.url)' 2>/dev/null || echo "")
-            if [ -n "$SVC_URL" ]; then
-              # Convert service-name to ENV_VAR_NAME (e.g. company-service -> COMPANY_SERVICE_URL)
-              ENV_NAME=$(echo "${SVC}" | tr '[:lower:]-' '[:upper:]_')_URL
-              ENV_VARS="$ENV_VARS;;${ENV_NAME}=${SVC_URL}"
-              echo "Resolved $SVC -> $SVC_URL"
-            fi
-          done
+          # Cloud Run URL suffix — deterministic, all services share the same suffix
+          # e.g. https://company-service-528350958894.us-east4.run.app
+          CLOUD_RUN_URL_SUFFIX=$(gcloud secrets versions access latest --secret=cloud-run-url-suffix --project=$GCP_PROJECT_ID)
+          ENV_VARS="$ENV_VARS;;CLOUD_RUN_URL_SUFFIX=${CLOUD_RUN_URL_SUFFIX}"
+          echo "Cloud Run URL suffix: $CLOUD_RUN_URL_SUFFIX"
 
           # MongoDB
           if [ -n "${{ inputs.mongodb_database }}" ]; then
@@ -364,15 +355,3 @@ jobs:
           echo "Service: ${{ inputs.service_name }}"
           echo "Version: ${{ env.VERSION }}"
           echo "URL: $SERVICE_URL"
-
-      - name: Trigger API Gateway re-deploy
-        if: inputs.service_name != 'api-gateway'
-        run: |
-          echo "Triggering api-gateway re-deploy to update service URLs..."
-          curl -X POST \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: token ${{ secrets.WORKFLOW_TOKEN }}" \
-            https://api.github.com/repos/pegasustms/api-gateway/actions/workflows/deploy-gcp.yml/dispatches \
-            -d '{"ref":"${{ github.ref_name }}"}'
-          echo "API Gateway re-deploy triggered on branch ${{ github.ref_name }}"
-
