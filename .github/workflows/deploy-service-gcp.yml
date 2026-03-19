@@ -365,3 +365,14 @@ jobs:
           echo "Version: ${{ env.VERSION }}"
           echo "URL: $SERVICE_URL"
 
+      - name: Trigger API Gateway re-deploy
+        if: inputs.service_name != 'api-gateway'
+        run: |
+          echo "Triggering api-gateway re-deploy to update service URLs..."
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.WORKFLOW_TOKEN }}" \
+            https://api.github.com/repos/pegasustms/api-gateway/actions/workflows/deploy-gcp.yml/dispatches \
+            -d '{"ref":"${{ github.ref_name }}"}'
+          echo "API Gateway re-deploy triggered on branch ${{ github.ref_name }}"
+
