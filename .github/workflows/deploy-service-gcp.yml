@@ -321,6 +321,13 @@ jobs:
             --format='value(name)' \
             --limit=1)
 
+          # --- Set min instances based on service type ---
+          if [ "${{ inputs.service_name }}" = "api-gateway" ]; then
+            MIN_INSTANCES=1
+          else
+            MIN_INSTANCES=0
+          fi
+
           # --- Deploy ---
           SERVICE_ACCOUNT="${{ secrets.GCP_SERVICE_ACCOUNT }}"
 
@@ -336,7 +343,7 @@ jobs:
             --ingress=${{ inputs.ingress }} \
             --vpc-connector=$VPC_CONNECTOR \
             --vpc-egress=all-traffic \
-            --min-instances=0 \
+            --min-instances=$MIN_INSTANCES \
             --max-instances=10 \
             --timeout=300 \
             --cpu-boost \
