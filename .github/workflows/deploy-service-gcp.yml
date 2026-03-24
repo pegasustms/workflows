@@ -321,12 +321,8 @@ jobs:
             --format='value(name)' \
             --limit=1)
 
-          # --- Set min instances based on service type ---
-          if [ "${{ inputs.service_name }}" = "api-gateway" ]; then
-            MIN_INSTANCES=1
-          else
-            MIN_INSTANCES=0
-          fi
+          # --- Set min instances - all services with at least 1 instance ---
+          MIN_INSTANCES=1
 
           # --- Deploy ---
           SERVICE_ACCOUNT="${{ secrets.GCP_SERVICE_ACCOUNT }}"
