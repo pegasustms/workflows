@@ -228,6 +228,7 @@ jobs:
 
           # --- Build env vars ---
           ENV_VARS="SPRING_PROFILES_ACTIVE=$ENVIRONMENT,gcp"
+          ENV_VARS="$ENV_VARS;;ENVIRONMENT=$ENVIRONMENT"
           ENV_VARS="$ENV_VARS;;SERVER_PORT=${{ inputs.expose_port }}"
           ENV_VARS="$ENV_VARS;;APP_VERSION=$VERSION"
           ENV_VARS="$ENV_VARS;;GIT_COMMIT_SHA=${{ github.sha }}"
@@ -278,10 +279,11 @@ jobs:
 
           # OpenTelemetry → Datadog Agent (only when agent URL is available)
           if [ -n "$DATADOG_AGENT_URL" ]; then
-            ENV_VARS="$ENV_VARS;;OTEL_TRACING_ENABLED=true"
             ENV_VARS="$ENV_VARS;;OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=${DATADOG_AGENT_URL}/v1/metrics"
             ENV_VARS="$ENV_VARS;;OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${DATADOG_AGENT_URL}/v1/traces"
             ENV_VARS="$ENV_VARS;;OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=${DATADOG_AGENT_URL}/v1/logs"
+            # Spring Boot Micrometer reads its own property, not the OTEL standard env var
+            ENV_VARS="$ENV_VARS;;MANAGEMENT_OTLP_METRICS_EXPORT_URL=${DATADOG_AGENT_URL}/v1/metrics"
           fi
           ENV_VARS="$ENV_VARS;;DD_ENV=$ENVIRONMENT"
           ENV_VARS="$ENV_VARS;;DD_SERVICE=${{ inputs.service_name }}"
@@ -326,7 +328,8 @@ jobs:
           MIN_INSTANCES=1
 
           # --- Deploy ---
-          SERVICE_ACCOUNT="${{ secrets.GCP_SERVICE_ACCOUNT }}"
+          SA_NAME="${{ inputs.service_name }}-sa"
+          SERVICE_ACCOUNT="${SA_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 
           gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
             --image=$IMAGE_URI \
