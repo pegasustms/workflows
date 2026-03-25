@@ -34,7 +34,7 @@ on:
       memory:
         required: false
         type: string
-        default: '512Mi'
+        default: '1024Mi'
         description: 'Memory allocation'
       ingress:
         required: false
@@ -287,7 +287,6 @@ jobs:
           fi
           ENV_VARS="$ENV_VARS;;DD_ENV=$ENVIRONMENT"
           ENV_VARS="$ENV_VARS;;DD_SERVICE=${{ inputs.service_name }}"
-          ENV_VARS="$ENV_VARS;;DD_PROFILING_ENABLED=true"
 
           # Extra env vars
           if [ -n "${{ inputs.extra_env_vars }}" ]; then
