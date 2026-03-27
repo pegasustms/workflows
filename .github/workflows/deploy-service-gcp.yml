@@ -237,7 +237,7 @@ jobs:
           if [ -n "${{ inputs.database_name }}" ]; then
             ENV_VARS="$ENV_VARS;;SPRING_DATASOURCE_URL=jdbc:postgresql://${DB_HOST}:5432/${{ inputs.database_name }}?prepareThreshold=0"
             ENV_VARS="$ENV_VARS;;SPRING_DATASOURCE_USERNAME=${DB_USER}"
-            ENV_VARS="$ENV_VARS;;SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE=15"
+            ENV_VARS="$ENV_VARS;;SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE=5"
           fi
 
           # Redis
@@ -342,7 +342,7 @@ jobs:
             --memory=${{ inputs.memory }} \
             --ingress=${{ inputs.ingress }} \
             --vpc-connector=$VPC_CONNECTOR \
-            --vpc-egress=private-ranges-only \
+            --vpc-egress=all-traffic \
             --min-instances=$MIN_INSTANCES \
             --max-instances=10 \
             --timeout=300 \
