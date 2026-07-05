@@ -33,10 +33,14 @@ on:
         type: number
         default: 1
     secrets:
+      # required: false de proposito. Os secrets AWS vivem no environment (dev/prod),
+      # nao em repo/org. Com required: true, a validacao caller-side falha porque os
+      # jobs build-test/release nao declaram environment (so build-push/deploy declaram).
+      # A entrega continua ok: build-push/deploy tem environment e recebem via inherit.
       AWS_ACCESS_KEY_ID:
-        required: true
+        required: false
       AWS_SECRET_ACCESS_KEY:
-        required: true
+        required: false
       PACKAGES_TOKEN:
         required: false
 
