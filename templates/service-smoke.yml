@@ -1,0 +1,21 @@
+# Copiar para `<service>/.github/workflows/smoke.yml`.
+# Roda smoke test após deploy concluir.
+
+name: Smoke
+
+on:
+  workflow_run:
+    workflows: ["Build & Deploy"]
+    types: [completed]
+    branches: [main, develop]
+
+jobs:
+  smoke:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    uses: pegasustms/workflows/.github/workflows/smoke-test.yml@main
+    with:
+      service_name: tenant-service              # <-- AJUSTAR
+      environment_name: ${{ github.event.workflow_run.head_branch == 'main' && 'prod' || 'dev' }}
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

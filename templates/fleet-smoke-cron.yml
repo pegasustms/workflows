@@ -1,0 +1,27 @@
+# Copiar para `workflows/.github/workflows/fleet-smoke-cron.yml` (este mesmo repo).
+# Roda smoke test em todos os services running diariamente.
+# Util para detectar deriva entre runs.
+
+name: Fleet Smoke (Cron)
+
+on:
+  schedule:
+    # 09:00 BRT (12:00 UTC) de segunda a sexta
+    - cron: '0 12 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        required: true
+        type: choice
+        options: [dev, stg, prod]
+        default: dev
+
+jobs:
+  smoke-all:
+    uses: ./.github/workflows/smoke-test.yml
+    with:
+      service_name: 'all'
+      environment_name: ${{ github.event.inputs.environment_name || 'dev' }}
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

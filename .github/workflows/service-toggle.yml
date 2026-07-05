@@ -1,0 +1,144 @@
+name: Toggle Service (Reusable)
+
+# Permite subir / descer / re-deployar 1 ou N services ECS sem precisar de
+# rodar comandos AWS CLI localmente. Pensado para o modelo "dev minimal" em
+# que ECS services ficam em desired_count=0 e só sobem quando você quer testar.
+#
+# Uso: caller no repo central (ou em qualquer service) que dispara via
+# workflow_dispatch passando os inputs.
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+        description: 'Nome do servico (ex: tenant-service). "all" para todos os services do Pegasus.'
+      action:
+        required: true
+        type: string
+        description: '"up" (desired_count=1) ou "down" (desired_count=0) ou "restart" (force new deployment).'
+      environment_name:
+        required: false
+        type: string
+        default: 'dev'
+        description: 'Ambiente alvo: dev, stg, ou prod. Determina cluster e env.'
+      desired_count_when_up:
+        required: false
+        type: number
+        default: 1
+        description: 'Quando action=up, desired_count alvo (1 para dev, 2 para prod com HA).'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+jobs:
+  toggle:
+    name: ${{ inputs.action }} ${{ inputs.service_name }} (${{ inputs.environment_name }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECS_CLUSTER: pegasus-${{ inputs.environment_name }}-cluster
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Resolve target services
+        id: resolve
+        run: |
+          if [ "${{ inputs.service_name }}" = "all" ]; then
+            # Lista todos os services do cluster que comecam com pegasus-<env>-
+            SERVICES=$(aws ecs list-services \
+              --cluster $ECS_CLUSTER \
+              --region $AWS_REGION \
+              --query "serviceArns[]" --output text | \
+              tr '\t' '\n' | \
+              awk -F'/' '{print $NF}')
+            echo "Services alvo: $SERVICES"
+          else
+            SERVICES="pegasus-${{ inputs.environment_name }}-${{ inputs.service_name }}"
+            echo "Service alvo: $SERVICES"
+          fi
+          # Salva multi-linha para o proximo step
+          {
+            echo "services<<EOF"
+            echo "$SERVICES"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Apply action (${{ inputs.action }})
+        run: |
+          ACTION="${{ inputs.action }}"
+          while IFS= read -r SVC; do
+            [ -z "$SVC" ] && continue
+            case "$ACTION" in
+              up)
+                COUNT="${{ inputs.desired_count_when_up }}"
+                echo ">> [up] $SVC -> desired_count=$COUNT"
+                aws ecs update-service \
+                  --cluster $ECS_CLUSTER \
+                  --service "$SVC" \
+                  --desired-count $COUNT \
+                  --region $AWS_REGION \
+                  --query 'service.{name:serviceName,desired:desiredCount,running:runningCount}' \
+                  --output table
+                ;;
+              down)
+                echo ">> [down] $SVC -> desired_count=0"
+                aws ecs update-service \
+                  --cluster $ECS_CLUSTER \
+                  --service "$SVC" \
+                  --desired-count 0 \
+                  --region $AWS_REGION \
+                  --query 'service.{name:serviceName,desired:desiredCount,running:runningCount}' \
+                  --output table
+                ;;
+              restart)
+                echo ">> [restart] $SVC -> force-new-deployment"
+                aws ecs update-service \
+                  --cluster $ECS_CLUSTER \
+                  --service "$SVC" \
+                  --force-new-deployment \
+                  --region $AWS_REGION \
+                  --query 'service.{name:serviceName,desired:desiredCount,running:runningCount}' \
+                  --output table
+                ;;
+              *)
+                echo "Acao invalida: $ACTION (use up | down | restart)" >&2
+                exit 1
+                ;;
+            esac
+          done <<< "${{ steps.resolve.outputs.services }}"
+
+      - name: Wait for stabilization (only on up/restart with N>0)
+        if: ${{ inputs.action != 'down' }}
+        run: |
+          while IFS= read -r SVC; do
+            [ -z "$SVC" ] && continue
+            echo ">> Aguardando $SVC estabilizar..."
+            aws ecs wait services-stable \
+              --cluster $ECS_CLUSTER \
+              --services "$SVC" \
+              --region $AWS_REGION || echo "WARN: timeout esperando $SVC (verificar manual)"
+          done <<< "${{ steps.resolve.outputs.services }}"
+
+      - name: Final status
+        run: |
+          while IFS= read -r SVC; do
+            [ -z "$SVC" ] && continue
+            aws ecs describe-services \
+              --cluster $ECS_CLUSTER \
+              --services "$SVC" \
+              --region $AWS_REGION \
+              --query 'services[0].{name:serviceName,desired:desiredCount,running:runningCount,pending:pendingCount}' \
+              --output table
+          done <<< "${{ steps.resolve.outputs.services }}"

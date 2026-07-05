@@ -1,0 +1,31 @@
+# Copiar para `<service>/.github/workflows/deploy.yml`.
+# Substituir abaixo:
+# - SERVICE_NAME = tenant-service (ou nome real do service)
+# - ECR_REPO     = pegasus/tenant-service
+
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      desired_count:
+        description: 'Desired count após deploy (0=só registra revisão, 1=sobe)'
+        required: false
+        default: '1'
+        type: string
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    # Branch main = prod, demais = dev. Para usar staging, criar branch `release/stg`.
+    uses: pegasustms/workflows/.github/workflows/deploy-service.yml@main
+    with:
+      service_name: tenant-service           # <-- AJUSTAR
+      ecr_repository: pegasus/tenant-service # <-- AJUSTAR
+      desired_count: ${{ fromJSON(github.event.inputs.desired_count || '1') }}
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      WORKFLOW_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}

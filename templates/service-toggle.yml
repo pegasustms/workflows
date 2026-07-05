@@ -1,0 +1,30 @@
+# Copiar para `<service>/.github/workflows/toggle.yml`.
+# Permite via UI do GitHub (Actions → Run workflow) ligar/desligar/restart o service.
+
+name: Toggle Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Acao'
+        required: true
+        type: choice
+        options: [up, down, restart]
+      environment_name:
+        description: 'Ambiente alvo'
+        required: true
+        type: choice
+        options: [dev, stg, prod]
+        default: dev
+
+jobs:
+  toggle:
+    uses: pegasustms/workflows/.github/workflows/service-toggle.yml@main
+    with:
+      service_name: tenant-service              # <-- AJUSTAR
+      action: ${{ github.event.inputs.action }}
+      environment_name: ${{ github.event.inputs.environment_name }}
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

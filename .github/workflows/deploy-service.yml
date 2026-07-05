@@ -16,6 +16,11 @@ on:
         type: string
         default: '8080'
         description: 'Porta exposta pelo serviço'
+      desired_count:
+        required: false
+        type: number
+        default: 1
+        description: 'Desired count após deploy. 1 para subir automático; >1 para HA; 0 para apenas registrar revisão sem subir (dev minimal).'
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -142,21 +147,29 @@ jobs:
             --cluster $ECS_CLUSTER \
             --service $ECS_SERVICE \
             --task-definition $TASK_DEF_ARN \
-            --desired-count 1 \
+            --desired-count ${{ inputs.desired_count }} \
             --region $AWS_REGION \
             --force-new-deployment
 
-          echo "Deployment initiated for $ECS_SERVICE"
+          echo "Deployment initiated for $ECS_SERVICE (desired_count=${{ inputs.desired_count }})"
 
       - name: Wait for deployment
+        if: ${{ inputs.desired_count > 0 }}
         run: |
           echo "Waiting for service to stabilize..."
           aws ecs wait services-stable \
             --cluster $ECS_CLUSTER \
             --services $ECS_SERVICE \
             --region $AWS_REGION
-          
+
           echo "Service $ECS_SERVICE is now stable!"
-          echo "✅ Deployment completed successfully!"
+          echo "Deployment completed successfully."
           echo "Version: $VERSION"
           echo "Image: ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$VERSION"
+
+      - name: Image registered only (desired_count=0)
+        if: ${{ inputs.desired_count == 0 }}
+        run: |
+          echo "Image built and pushed: ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$VERSION"
+          echo "Task definition $TASK_DEF_ARN registered."
+          echo "Service kept at desired_count=0 (dev minimal). Subir manualmente via service-toggle workflow."

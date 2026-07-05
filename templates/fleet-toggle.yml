@@ -1,0 +1,55 @@
+# Copiar para `workflows/.github/workflows/fleet-toggle.yml` (este mesmo repo).
+# Permite via UI controlar TODOS ou QUALQUER service sem precisar tocar repos individuais.
+#
+# Útil quando:
+# - Quer subir "all" para teste E2E e descer no fim do dia.
+# - Quer subir um service específico sem ir no repo dele.
+
+name: Fleet Toggle
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: 'Service alvo (ex: tenant-service, ou "all" para todos)'
+        required: true
+        type: string
+        default: 'all'
+      action:
+        description: 'Acao'
+        required: true
+        type: choice
+        options: [up, down, restart]
+      environment_name:
+        description: 'Ambiente'
+        required: true
+        type: choice
+        options: [dev, stg, prod]
+        default: dev
+      include_datadog_collector:
+        description: 'Subir/descer o datadog-collector tambem?'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  toggle-services:
+    uses: ./.github/workflows/service-toggle.yml
+    with:
+      service_name: ${{ github.event.inputs.service_name }}
+      action: ${{ github.event.inputs.action }}
+      environment_name: ${{ github.event.inputs.environment_name }}
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  toggle-collector:
+    if: ${{ github.event.inputs.include_datadog_collector == 'true' }}
+    needs: toggle-services
+    uses: ./.github/workflows/datadog-collector.yml
+    with:
+      action: ${{ github.event.inputs.action }}
+      environment_name: ${{ github.event.inputs.environment_name }}
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

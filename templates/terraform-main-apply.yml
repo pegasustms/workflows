@@ -1,0 +1,58 @@
+# Copiar para `terraform/.github/workflows/apply.yml`.
+# Aplica mudanças quando merge em main.
+
+name: Terraform Apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.tf'
+      - '**.tfvars'
+      - 'environments/**'
+      - 'modules/**'
+      - 'Makefile'
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        description: 'Ambiente alvo'
+        required: true
+        type: choice
+        options: [dev, stg, prod]
+        default: dev
+
+jobs:
+  # Default: apply em dev quando push em main. Outros ambientes via workflow_dispatch.
+  apply-dev:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment_name == 'dev')
+    uses: pegasustms/workflows/.github/workflows/terraform-apply.yml@main
+    with:
+      environment_name: dev
+      working_directory: '.'
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      TF_VARS_TFVARS: ${{ secrets.TF_VARS_TFVARS }}
+
+  apply-stg:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment_name == 'stg'
+    uses: pegasustms/workflows/.github/workflows/terraform-apply.yml@main
+    with:
+      environment_name: stg
+      working_directory: '.'
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      TF_VARS_TFVARS: ${{ secrets.TF_VARS_TFVARS_STG }}
+
+  apply-prod:
+    # Prod sempre via dispatch, com required reviewers no GitHub Environment.
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment_name == 'prod'
+    uses: pegasustms/workflows/.github/workflows/terraform-apply.yml@main
+    with:
+      environment_name: prod
+      working_directory: '.'
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      TF_VARS_TFVARS: ${{ secrets.TF_VARS_TFVARS_PROD }}

@@ -1,0 +1,117 @@
+name: Datadog Collector (Reusable)
+
+# Subir / descer / restart o datadog-collector compartilhado.
+# A imagem é a publica `public.ecr.aws/datadog/agent:latest` — não há build necessario.
+# Task definition foi criada pelo Terraform (module datadog-collector).
+# Service Discovery DNS: datadog-collector.pegasus.local
+#
+# Quando subir: collector recebe OTLP dos demais services e encaminha para
+# o Datadog SaaS. Sem ele, nenhuma telemetria sai do cluster.
+
+on:
+  workflow_call:
+    inputs:
+      action:
+        required: true
+        type: string
+        description: '"up", "down" ou "restart"'
+      environment_name:
+        required: false
+        type: string
+        default: 'dev'
+        description: 'Ambiente alvo: dev, stg, ou prod'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+jobs:
+  toggle:
+    name: ${{ inputs.action }} datadog-collector (${{ inputs.environment_name }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECS_CLUSTER: pegasus-${{ inputs.environment_name }}-cluster
+      ECS_SERVICE: pegasus-${{ inputs.environment_name }}-datadog-collector
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Apply action
+        run: |
+          case "${{ inputs.action }}" in
+            up)
+              echo ">> Subindo datadog-collector"
+              aws ecs update-service \
+                --cluster $ECS_CLUSTER \
+                --service $ECS_SERVICE \
+                --desired-count 1 \
+                --region $AWS_REGION \
+                --query 'service.{name:serviceName,desired:desiredCount}' \
+                --output table
+              ;;
+            down)
+              echo ">> Descendo datadog-collector"
+              aws ecs update-service \
+                --cluster $ECS_CLUSTER \
+                --service $ECS_SERVICE \
+                --desired-count 0 \
+                --region $AWS_REGION \
+                --query 'service.{name:serviceName,desired:desiredCount}' \
+                --output table
+              ;;
+            restart)
+              echo ">> Restart datadog-collector"
+              aws ecs update-service \
+                --cluster $ECS_CLUSTER \
+                --service $ECS_SERVICE \
+                --force-new-deployment \
+                --region $AWS_REGION \
+                --query 'service.{name:serviceName,desired:desiredCount}' \
+                --output table
+              ;;
+            *)
+              echo "Acao invalida (use up | down | restart)" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Wait for stabilization
+        if: ${{ inputs.action != 'down' }}
+        run: |
+          echo ">> Aguardando service estabilizar..."
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --region $AWS_REGION
+
+      - name: Status
+        run: |
+          aws ecs describe-services \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --region $AWS_REGION \
+            --query 'services[0].{name:serviceName,desired:desiredCount,running:runningCount,pending:pendingCount,events:events[0:3].message}' \
+            --output table
+
+      - name: Smoke - verifica resolucao DNS
+        if: ${{ inputs.action != 'down' }}
+        run: |
+          # Service Discovery so resolve dentro da VPC, entao nao da pra testar aqui.
+          # Imprimir hostname esperado para o operador validar via bastion.
+          echo "Quando subir, o collector deve responder em:"
+          echo "  datadog-collector.pegasus.local:4318 (OTLP HTTP)"
+          echo "  datadog-collector.pegasus.local:4317 (OTLP gRPC)"
+          echo "  datadog-collector.pegasus.local:8126 (Datadog APM)"
+          echo ""
+          echo "Para validar, no bastion:"
+          echo "  nslookup datadog-collector.pegasus.local"
+          echo "  curl -v http://datadog-collector.pegasus.local:4318/"

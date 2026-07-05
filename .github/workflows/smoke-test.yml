@@ -1,0 +1,139 @@
+name: Smoke Test (Reusable)
+
+# Bate em /actuator/health de 1 ou N services e falha se não retornar UP.
+# Pode ser chamado:
+# - Após deploy de um service (caller no repo do service)
+# - Em cron diário (caller no repo workflows agendado)
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+        description: 'Nome do service (ex: tenant-service). "all" para todos.'
+      environment_name:
+        required: false
+        type: string
+        default: 'dev'
+      api_base_url:
+        required: false
+        type: string
+        default: ''
+        description: 'URL base (ex: https://api-dev.pegasustms.com.br). Vazio = busca do output do ALB.'
+      timeout_seconds:
+        required: false
+        type: number
+        default: 60
+        description: 'Quantos segundos aguardar até desistir do health check.'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+jobs:
+  smoke:
+    name: Smoke ${{ inputs.service_name }} (${{ inputs.environment_name }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECS_CLUSTER: pegasus-${{ inputs.environment_name }}-cluster
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Resolve API base URL
+        id: resolve
+        run: |
+          if [ -n "${{ inputs.api_base_url }}" ]; then
+            API_URL="${{ inputs.api_base_url }}"
+          else
+            # Default por env
+            case "${{ inputs.environment_name }}" in
+              dev) API_URL="https://api-dev.pegasustms.com.br" ;;
+              stg) API_URL="https://api-stg.pegasustms.com.br" ;;
+              prod) API_URL="https://api.pegasustms.com.br" ;;
+              *) echo "env desconhecido"; exit 1 ;;
+            esac
+          fi
+          echo "API_URL=$API_URL" >> $GITHUB_ENV
+          echo "API_URL: $API_URL"
+
+      - name: Resolve target services
+        id: targets
+        run: |
+          if [ "${{ inputs.service_name }}" = "all" ]; then
+            # Lista todos os services running no cluster
+            SERVICES=$(aws ecs list-services \
+              --cluster $ECS_CLUSTER \
+              --region $AWS_REGION \
+              --query "serviceArns[]" --output text | \
+              tr '\t' '\n' | awk -F'/' '{print $NF}' | \
+              sed "s/^pegasus-${{ inputs.environment_name }}-//")
+          else
+            SERVICES="${{ inputs.service_name }}"
+          fi
+          {
+            echo "services<<EOF"
+            echo "$SERVICES"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Health check loop
+        run: |
+          FAILED=0
+          TOTAL=0
+          while IFS= read -r SVC; do
+            [ -z "$SVC" ] && continue
+            TOTAL=$((TOTAL+1))
+
+            # Diferentes services tem diferentes paths.
+            # api-gateway é o único exposto via ALB; demais via Service Discovery interno
+            # (não acessível do GitHub Actions runner). Smoke real só p/ api-gateway.
+            if [ "$SVC" = "api-gateway" ]; then
+              URL="$API_URL/actuator/health"
+              echo ">> GET $URL"
+              if curl -sf --max-time ${{ inputs.timeout_seconds }} "$URL" > /dev/null; then
+                echo "OK $SVC"
+              else
+                echo "FAIL $SVC"
+                FAILED=$((FAILED+1))
+              fi
+            else
+              # Para services internos, verifica via ECS describe se está rodando
+              RUNNING=$(aws ecs describe-services \
+                --cluster $ECS_CLUSTER \
+                --services "pegasus-${{ inputs.environment_name }}-$SVC" \
+                --region $AWS_REGION \
+                --query 'services[0].runningCount' \
+                --output text)
+              DESIRED=$(aws ecs describe-services \
+                --cluster $ECS_CLUSTER \
+                --services "pegasus-${{ inputs.environment_name }}-$SVC" \
+                --region $AWS_REGION \
+                --query 'services[0].desiredCount' \
+                --output text)
+              if [ "$RUNNING" = "$DESIRED" ] && [ "$DESIRED" -gt 0 ]; then
+                echo "OK $SVC (running=$RUNNING/desired=$DESIRED)"
+              elif [ "$DESIRED" = "0" ]; then
+                echo "SKIP $SVC (desired_count=0)"
+              else
+                echo "FAIL $SVC (running=$RUNNING/desired=$DESIRED)"
+                FAILED=$((FAILED+1))
+              fi
+            fi
+          done <<< "${{ steps.targets.outputs.services }}"
+
+          echo ""
+          echo "=== Resumo: $((TOTAL-FAILED))/$TOTAL OK ==="
+          if [ $FAILED -gt 0 ]; then
+            exit 1
+          fi

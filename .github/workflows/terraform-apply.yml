@@ -1,0 +1,104 @@
+name: Terraform Apply (Reusable)
+
+# Aplica mudanças de infra Terraform.
+# Trigger no caller: push em `main` do repo terraform.
+# Em prod: usar GitHub Environment com required reviewers (manual approval).
+
+on:
+  workflow_call:
+    inputs:
+      environment_name:
+        required: true
+        type: string
+        description: 'Ambiente alvo: dev, stg, ou prod.'
+      working_directory:
+        required: false
+        type: string
+        default: '.'
+      terraform_version:
+        required: false
+        type: string
+        default: '1.10.0'
+      auto_approve:
+        required: false
+        type: boolean
+        default: false
+        description: 'Se true, pula confirmação. Padrão false em prod (requer GitHub Environment com reviewers).'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      TF_VARS_TFVARS:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: Apply ${{ inputs.environment_name }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ENV: ${{ inputs.environment_name }}
+
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write terraform.tfvars from secret
+        run: |
+          cat > terraform.tfvars <<'TFEOF'
+          ${{ secrets.TF_VARS_TFVARS }}
+          TFEOF
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Terraform init
+        run: make init ENV=$ENV
+
+      - name: Terraform plan (saving to file)
+        run: |
+          set -e
+          # Replace tfvars/backend via Makefile, então rodamos plan manualmente para -out
+          cp environments/$ENV.tfvars environments/$ENV.tfvars.tmp
+          sed -i'' -e "s/__AWS_REGION__/${{ env.AWS_REGION }}/g" environments/$ENV.tfvars.tmp
+          sed -i'' -e "s/__PROJECT_NAME__/pegasus/g" environments/$ENV.tfvars.tmp
+          sed -i'' -e "s/__ENVIRONMENT__/$ENV/g" environments/$ENV.tfvars.tmp
+          sed -i'' -e "s/__DOMAIN_NAME__/pegasustms.com.br/g" environments/$ENV.tfvars.tmp
+          terraform plan -var-file=environments/$ENV.tfvars.tmp -out=tfplan
+          rm -f environments/$ENV.tfvars.tmp environments/*.tmp-e
+
+      - name: Terraform apply
+        run: |
+          terraform apply -auto-approve tfplan
+
+      - name: Output post-apply
+        run: |
+          echo "=== Outputs do terraform após apply ==="
+          terraform output
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Terraform apply FALHOU em $ENV."
+          echo "Verificar state lock: aws dynamodb scan --table-name pegasus-terraform-lock --region $AWS_REGION"
+          echo "Liberar lock se necessário: terraform force-unlock <LOCK_ID>"
+          exit 1

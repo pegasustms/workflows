@@ -1,0 +1,237 @@
+name: Deploy Service (Reusable v2 - multi-step)
+
+# Pipeline em jobs isolados (build-test -> build-push -> deploy -> release).
+# Cada estagio e um job proprio: da pra re-rodar um job isolado pela UI do
+# Actions ("Re-run failed jobs" / "Re-run this job") reaproveitando os outputs
+# dos jobs anteriores que ja passaram.
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: 'Nome do servico (ex: conhecimento-service). ECR = pegasus/<service-name>.'
+        required: true
+        type: string
+      display-name:
+        description: 'Nome amigavel usado no titulo do release. Default: service-name.'
+        required: false
+        type: string
+        default: ''
+      java-version:
+        description: 'Versao do JDK para o job de testes.'
+        required: false
+        type: string
+        default: '25'
+      maven-server-id:
+        description: 'server-id do settings.xml para o GitHub Packages.'
+        required: false
+        type: string
+        default: 'github'
+      desired_count:
+        description: 'Desired count apos deploy. 1 para subir; >1 para HA; 0 para so registrar revisao sem subir (dev minimal).'
+        required: false
+        type: number
+        default: 1
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      PACKAGES_TOKEN:
+        required: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ENVIRONMENT: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+  ECR_REPOSITORY: pegasus/${{ inputs.service-name }}
+  ECS_CLUSTER: pegasus-${{ github.ref_name == 'main' && 'prod' || 'dev' }}-cluster
+  ECS_SERVICE: pegasus-${{ github.ref_name == 'main' && 'prod' || 'dev' }}-${{ inputs.service-name }}
+
+jobs:
+  build-test:
+    name: Build & Test (Maven)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+          server-id: ${{ inputs.maven-server-id }}
+          server-username: MAVEN_ACTOR
+          server-password: MAVEN_TOKEN
+      - name: Build e testes
+        env:
+          MAVEN_ACTOR: ${{ github.actor }}
+          MAVEN_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: mvn -B clean verify
+
+  build-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: build-test
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Version
+        id: version
+        run: |
+          TZ="America/Sao_Paulo"
+          DATE=$(TZ=$TZ date +'%Y%m%d')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "value=${DATE}-${SHORT_SHA}-${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ inputs.service-name }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ inputs.service-name }}-
+      - name: Build, tag, and push image to ECR
+        id: build
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.version.outputs.value }}
+          GH_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker buildx build --platform linux/amd64 \
+            --build-arg GITHUB_ACTOR=${{ github.actor }} \
+            --secret id=gh_token,env=GH_TOKEN \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            -t "$IMAGE" \
+            -t "$REGISTRY/$ECR_REPOSITORY:latest" \
+            --push \
+            .
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: build-push
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    permissions:
+      contents: read
+    env:
+      IMAGE: ${{ needs.build-push.outputs.image }}
+      VERSION: ${{ needs.build-push.outputs.version }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Update task definition with new image
+        run: |
+          TASK_DEF_JSON=$(aws ecs describe-task-definition \
+            --task-definition $ECS_SERVICE \
+            --region $AWS_REGION \
+            --query 'taskDefinition')
+          FULL_SHA="${{ github.sha }}"
+          NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq \
+            --arg IMAGE "$IMAGE" \
+            --arg SERVICE "${{ inputs.service-name }}" \
+            --arg APP_VERSION "$VERSION" \
+            --arg GIT_SHA "$FULL_SHA" \
+            '.containerDefinitions = [.containerDefinitions[] |
+              if .name == $SERVICE then
+                .image = $IMAGE |
+                .environment = (.environment // [] |
+                  map(select(.name != "APP_VERSION" and .name != "GIT_COMMIT_SHA")) +
+                  [{name: "APP_VERSION", value: $APP_VERSION}, {name: "GIT_COMMIT_SHA", value: $GIT_SHA}]
+                )
+              else . end
+            ] | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --region $AWS_REGION \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
+          echo "Registered: $TASK_DEF_ARN with image $IMAGE"
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --task-definition $TASK_DEF_ARN \
+            --desired-count ${{ inputs.desired_count }} \
+            --force-new-deployment \
+            --region $AWS_REGION
+          echo "Deployment initiated for $ECS_SERVICE (desired_count=${{ inputs.desired_count }})"
+      - name: Wait for deployment
+        if: ${{ inputs.desired_count > 0 }}
+        run: |
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --region $AWS_REGION
+          echo "Service $ECS_SERVICE is now stable! Version: $VERSION"
+      - name: Image registered only (desired_count=0)
+        if: ${{ inputs.desired_count == 0 }}
+        run: |
+          echo "Task definition $TASK_DEF_ARN registrada com image $IMAGE."
+          echo "Servico mantido em desired_count=0 (dev minimal). Subir via workflow service-toggle."
+
+  release:
+    name: Tag & Release
+    runs-on: ubuntu-latest
+    needs: [build-push, deploy]
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build-push.outputs.version }}
+      IMAGE: ${{ needs.build-push.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Tag and Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TZ="America/Sao_Paulo"
+          TIMESTAMP=$(TZ=$TZ date +'%Y%m%d-%H%M%S')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DISPLAY="${{ inputs.display-name != '' && inputs.display-name || inputs.service-name }}"
+          if [ "${{ github.ref_name }}" == "main" ]; then
+            TAG_NAME="${TIMESTAMP}-${SHORT_SHA}"
+            RELEASE_NAME="${DISPLAY} - Production ${TIMESTAMP}"
+            PRERELEASE="false"
+          else
+            TAG_NAME="${TIMESTAMP}-${SHORT_SHA}-rc"
+            RELEASE_NAME="${DISPLAY} - Development ${TIMESTAMP} (RC)"
+            PRERELEASE="true"
+          fi
+          git tag "$TAG_NAME"
+          git push origin "$TAG_NAME"
+          gh release create "$TAG_NAME" \
+            --title "$RELEASE_NAME" \
+            --notes "$(printf '**Environment:** %s\n\n**Commit:** %s\n\n**Image:** %s\n\n**ECS Service:** %s' \
+              "$ENVIRONMENT" "${{ github.sha }}" "$IMAGE" "$ECS_SERVICE")" \
+            --prerelease="$PRERELEASE"
