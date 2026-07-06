@@ -73,7 +73,8 @@ jobs:
         env:
           MAVEN_ACTOR: ${{ github.actor }}
           MAVEN_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
-        run: mvn -B clean verify
+        # exclui testes @Tag("integration") (sobem contexto/infra); rodar IT separado com infra
+        run: mvn -B clean verify -DexcludedGroups=integration
 
   build-push:
     name: Build & Push Image
