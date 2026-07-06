@@ -1,0 +1,58 @@
+name: Release (Reusable)
+
+# Estagio final: cria tag + GitHub Release apontando pra imagem publicada.
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      display-name:
+        required: false
+        type: string
+        default: ''
+      image:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+
+env:
+  ENVIRONMENT: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+
+jobs:
+  release:
+    name: Tag & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create Tag and Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ inputs.image }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          TZ="America/Sao_Paulo"
+          TIMESTAMP=$(TZ=$TZ date +'%Y%m%d-%H%M%S')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DISPLAY="${{ inputs.display-name != '' && inputs.display-name || inputs.service-name }}"
+          if [ "${{ github.ref_name }}" == "main" ]; then
+            TAG_NAME="${TIMESTAMP}-${SHORT_SHA}"
+            RELEASE_NAME="${DISPLAY} - Production ${TIMESTAMP}"
+            PRERELEASE="false"
+          else
+            TAG_NAME="${TIMESTAMP}-${SHORT_SHA}-rc"
+            RELEASE_NAME="${DISPLAY} - Development ${TIMESTAMP} (RC)"
+            PRERELEASE="true"
+          fi
+          git tag "$TAG_NAME"
+          git push origin "$TAG_NAME"
+          gh release create "$TAG_NAME" \
+            --title "$RELEASE_NAME" \
+            --notes "$(printf '**Environment:** %s\n\n**Commit:** %s\n\n**Image:** %s\n\n**Version:** %s' \
+              "$ENVIRONMENT" "${{ github.sha }}" "$IMAGE" "$VERSION")" \
+            --prerelease="$PRERELEASE"

@@ -1,0 +1,84 @@
+name: Deploy to VPS (Reusable)
+
+# Deploy do ambiente DEV: sobe a imagem numa VPS via SSH + docker compose.
+# O runner faz broker do login ECR (gera o token e passa pra VPS via stdin);
+# a VPS nao guarda credencial AWS. Tag fixada por deploy no .env do compose.
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      image:
+        description: 'URI da imagem no ECR (output do build-push).'
+        required: true
+        type: string
+      version:
+        description: 'Tag da imagem (output do build-push).'
+        required: true
+        type: string
+      vps_compose_dir:
+        description: 'Diretorio na VPS com docker-compose.vps.yml e .env.'
+        required: false
+        type: string
+        default: '/home/ubuntu'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      VPS_HOST:
+        required: false
+      VPS_USER:
+        required: false
+      VPS_SSH_KEY:
+        required: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  deploy-vps:
+    name: Deploy to VPS (dev)
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Deploy via SSH + docker compose
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          SERVICE: ${{ inputs.service-name }}
+          IMAGE: ${{ inputs.image }}
+          VERSION: ${{ inputs.version }}
+          COMPOSE_DIR: ${{ inputs.vps_compose_dir }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          SSH="ssh -i $HOME/.ssh/id_deploy -o StrictHostKeyChecking=accept-new $VPS_USER@$VPS_HOST"
+          # registry vem do proprio IMAGE (<acct>.dkr.ecr.<region>.amazonaws.com/...)
+          REGISTRY="${IMAGE%%/*}"
+          # broker do login ECR: runner gera o token, VPS faz docker login (senha via stdin)
+          ECR_PASS=$(aws ecr get-login-password --region "$AWS_REGION")
+          echo "::add-mask::$ECR_PASS"
+          printf '%s' "$ECR_PASS" | $SSH "docker login --username AWS --password-stdin $REGISTRY"
+          # var de tag deste servico (api-gateway -> API_GATEWAY_TAG) no .env do compose
+          TAG_VAR=$(printf '%s' "${SERVICE}_TAG" | tr 'a-z-' 'A-Z_')
+          $SSH "set -e; cd '$COMPOSE_DIR'; touch .env; \
+            grep -v \"^${TAG_VAR}=\" .env > .env.tmp 2>/dev/null || true; \
+            echo \"${TAG_VAR}=$VERSION\" >> .env.tmp; mv .env.tmp .env; \
+            docker compose -f docker-compose.vps.yml pull '$SERVICE'; \
+            docker compose -f docker-compose.vps.yml up -d '$SERVICE'"
+          echo "Deploy VPS ok: $SERVICE=$VERSION em $VPS_HOST ($COMPOSE_DIR)"

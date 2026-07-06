@@ -1,0 +1,103 @@
+name: Deploy to AWS ECS (Reusable)
+
+# Deploy do ambiente PROD: registra nova task definition e atualiza o service no ECS.
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      image:
+        description: 'URI da imagem no ECR (output do build-push).'
+        required: true
+        type: string
+      version:
+        description: 'Tag da imagem (output do build-push).'
+        required: true
+        type: string
+      desired_count:
+        description: 'Desired count apos deploy. 1 sobe; >1 HA; 0 so registra revisao sem subir.'
+        required: false
+        type: number
+        default: 1
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECS_CLUSTER: pegasus-${{ github.ref_name == 'main' && 'prod' || 'dev' }}-cluster
+  ECS_SERVICE: pegasus-${{ github.ref_name == 'main' && 'prod' || 'dev' }}-${{ inputs.service-name }}
+
+jobs:
+  deploy-aws:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    permissions:
+      contents: read
+    env:
+      IMAGE: ${{ inputs.image }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Update task definition with new image
+        run: |
+          TASK_DEF_JSON=$(aws ecs describe-task-definition \
+            --task-definition $ECS_SERVICE \
+            --region $AWS_REGION \
+            --query 'taskDefinition')
+          FULL_SHA="${{ github.sha }}"
+          NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq \
+            --arg IMAGE "$IMAGE" \
+            --arg SERVICE "${{ inputs.service-name }}" \
+            --arg APP_VERSION "$VERSION" \
+            --arg GIT_SHA "$FULL_SHA" \
+            '.containerDefinitions = [.containerDefinitions[] |
+              if .name == $SERVICE then
+                .image = $IMAGE |
+                .environment = (.environment // [] |
+                  map(select(.name != "APP_VERSION" and .name != "GIT_COMMIT_SHA")) +
+                  [{name: "APP_VERSION", value: $APP_VERSION}, {name: "GIT_COMMIT_SHA", value: $GIT_SHA}]
+                )
+              else . end
+            ] | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --region $AWS_REGION \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
+          echo "Registered: $TASK_DEF_ARN with image $IMAGE"
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --task-definition $TASK_DEF_ARN \
+            --desired-count ${{ inputs.desired_count }} \
+            --force-new-deployment \
+            --region $AWS_REGION
+          echo "Deployment initiated for $ECS_SERVICE (desired_count=${{ inputs.desired_count }})"
+      - name: Wait for deployment
+        if: ${{ inputs.desired_count > 0 }}
+        run: |
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --region $AWS_REGION
+          echo "Service $ECS_SERVICE is now stable! Version: $VERSION"
+      - name: Image registered only (desired_count=0)
+        if: ${{ inputs.desired_count == 0 }}
+        run: |
+          echo "Task definition $TASK_DEF_ARN registrada com image $IMAGE."
+          echo "Servico mantido em desired_count=0. Subir via workflow service-toggle."
