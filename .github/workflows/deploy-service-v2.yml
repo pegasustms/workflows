@@ -59,7 +59,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
@@ -88,7 +88,7 @@ jobs:
       version: ${{ steps.version.outputs.value }}
       image: ${{ steps.build.outputs.image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Generate Version
         id: version
         run: |
@@ -215,7 +215,7 @@ jobs:
       VERSION: ${{ needs.build-push.outputs.version }}
       IMAGE: ${{ needs.build-push.outputs.image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Create Tag and Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
