@@ -76,9 +76,11 @@ jobs:
           printf '%s' "$ECR_PASS" | $SSH "docker login --username AWS --password-stdin $REGISTRY"
           # var de tag deste servico (api-gateway -> API_GATEWAY_TAG) no .env do compose
           TAG_VAR=$(printf '%s' "${SERVICE}_TAG" | tr 'a-z-' 'A-Z_')
+          # upsert ECR_REGISTRY (do proprio IMAGE) + a tag deste servico no .env
           $SSH "set -e; cd '$COMPOSE_DIR'; touch .env; \
-            grep -v \"^${TAG_VAR}=\" .env > .env.tmp 2>/dev/null || true; \
-            echo \"${TAG_VAR}=$VERSION\" >> .env.tmp; mv .env.tmp .env; \
+            grep -vE \"^(ECR_REGISTRY|${TAG_VAR})=\" .env > .env.tmp 2>/dev/null || true; \
+            { echo \"ECR_REGISTRY=$REGISTRY\"; echo \"${TAG_VAR}=$VERSION\"; } >> .env.tmp; \
+            mv .env.tmp .env; \
             docker compose -f docker-compose.vps.yml pull '$SERVICE'; \
             docker compose -f docker-compose.vps.yml up -d '$SERVICE'"
           echo "Deploy VPS ok: $SERVICE=$VERSION em $VPS_HOST ($COMPOSE_DIR)"
