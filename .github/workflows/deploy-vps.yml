@@ -82,5 +82,5 @@ jobs:
             { echo \"ECR_REGISTRY=$REGISTRY\"; echo \"${TAG_VAR}=$VERSION\"; } >> .env.tmp; \
             mv .env.tmp .env; \
             docker compose -f docker-compose.vps.yml pull '$SERVICE'; \
-            docker compose -f docker-compose.vps.yml up -d '$SERVICE'"
+            docker compose -f docker-compose.vps.yml up -d --no-deps '$SERVICE'"
           echo "Deploy VPS ok: $SERVICE=$VERSION em $VPS_HOST ($COMPOSE_DIR)"
