@@ -54,4 +54,4 @@ jobs:
           if-no-files-found: ignore
 
   gitleaks:
-    uses: pegasustms/workflows/.github/workflows/gitleaks.yml@feat/gitleaks
+    uses: pegasustms/workflows/.github/workflows/gitleaks.yml@main

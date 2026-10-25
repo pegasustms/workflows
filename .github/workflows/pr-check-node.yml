@@ -119,4 +119,4 @@ jobs:
           npm run build --if-present
 
   gitleaks:
-    uses: pegasustms/workflows/.github/workflows/gitleaks.yml@feat/gitleaks
+    uses: pegasustms/workflows/.github/workflows/gitleaks.yml@main
