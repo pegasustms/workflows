@@ -117,3 +117,6 @@ jobs:
             export "${linha?}"
           done <<< "$BUILD_ENV"
           npm run build --if-present
+
+  gitleaks:
+    uses: pegasustms/workflows/.github/workflows/gitleaks.yml@feat/gitleaks

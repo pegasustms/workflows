@@ -52,3 +52,6 @@ jobs:
           path: '**/target/surefire-reports/'
           retention-days: 7
           if-no-files-found: ignore
+
+  gitleaks:
+    uses: pegasustms/workflows/.github/workflows/gitleaks.yml@feat/gitleaks
