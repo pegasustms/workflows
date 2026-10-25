@@ -1,0 +1,119 @@
+name: PR Check Node (Reusable)
+
+# Lint, tipos e build no PR para projetos npm (frontend). Hoje o build so acontece no
+# deploy (Amplify). O lint e uma catraca por arquivo: o legado tem erros, entao o PR so
+# falha se algum arquivo alterado ficar com mais erros do que tinha no base.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        required: false
+        type: string
+        default: '22'
+      build-env:
+        description: 'Variaveis do build, uma KEY=VALUE por linha (linhas com # sao ignoradas). Nada de segredo real.'
+        required: false
+        type: string
+        default: ''
+      lint:
+        description: 'Roda a catraca do ESLint.'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  check:
+    name: Lint, tipos e build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - name: Instalar dependencias
+        run: npm ci --no-audit --no-fund
+      - name: Lint (catraca por arquivo)
+        if: inputs.lint
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          # Catraca do ESLint: no PR, nenhum arquivo alterado pode ter mais erros do que tinha
+          # no base. Codigo novo entra limpo e o legado melhora quando alguem mexe nele.
+          if [ "${EVENT:-}" != pull_request ]; then
+            echo "Evento ${EVENT:-?} sem base de comparacao; catraca do lint so roda em PR"
+            exit 0
+          fi
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+
+          # Pares "caminho_atual<TAB>caminho_no_base" (renomeado compara com o nome antigo)
+          pares="$RUNNER_TEMP/lint-pares.tsv"
+          git diff --name-status -M --diff-filter=ACMR "$base" HEAD -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' |
+            awk -F'\t' '$1 ~ /^[RC]/ { print $3 "\t" $2; next } { print $2 "\t" $2 }' > "$pares"
+          if [ ! -s "$pares" ]; then
+            echo "Nenhum arquivo JS/TS alterado"
+            exit 0
+          fi
+
+          atuais=()
+          while IFS=$'\t' read -r atual _; do atuais+=("$atual"); done < "$pares"
+          npx eslint --no-warn-ignored -f json -o "$RUNNER_TEMP/lint-head.json" "${atuais[@]}" || true
+
+          git worktree add -q --detach "$RUNNER_TEMP/lint-base" "$base"
+          ln -s "$PWD/node_modules" "$RUNNER_TEMP/lint-base/node_modules"
+          existentes=()
+          while IFS=$'\t' read -r _ antigo; do
+            [ -f "$RUNNER_TEMP/lint-base/$antigo" ] && existentes+=("$antigo")
+          done < "$pares"
+          if [ ${#existentes[@]} -gt 0 ]; then
+            (cd "$RUNNER_TEMP/lint-base" && npx eslint --no-warn-ignored -f json -o "$RUNNER_TEMP/lint-base.json" "${existentes[@]}") || true
+          else
+            echo '[]' > "$RUNNER_TEMP/lint-base.json"
+          fi
+          git worktree remove --force "$RUNNER_TEMP/lint-base"
+
+          node - "$pares" "$RUNNER_TEMP/lint-head.json" "$RUNNER_TEMP/lint-base.json" "$PWD" "$RUNNER_TEMP/lint-base" <<'JS'
+          const fs = require("fs"), path = require("path");
+          const [pares, headJson, baseJson, raizHead, raizBase] = process.argv.slice(2);
+          const erros = (arq, raiz) => {
+            const m = new Map();
+            for (const f of JSON.parse(fs.readFileSync(arq, "utf8"))) {
+              m.set(path.relative(raiz, f.filePath), f.messages.filter((x) => x.severity === 2));
+            }
+            return m;
+          };
+          const head = erros(headJson, raizHead), base = erros(baseJson, raizBase);
+          let piorou = 0;
+          for (const linha of fs.readFileSync(pares, "utf8").trim().split("\n")) {
+            const [atual, antigo] = linha.split("\t");
+            const agora = head.get(atual) || [], antes = (base.get(antigo) || []).length;
+            if (agora.length <= antes) continue;
+            piorou++;
+            console.log(`::error file=${atual}::${atual}: ${agora.length} erro(s) de lint, no base eram ${antes}`);
+            for (const e of agora) console.log(`::error file=${atual},line=${e.line},col=${e.column}::${e.ruleId || "eslint"}: ${e.message}`);
+          }
+          console.log(piorou ? `${piorou} arquivo(s) com mais erros de lint que no base` : "Nenhum arquivo alterado ganhou erro de lint");
+          process.exit(piorou ? 1 : 0);
+          JS
+      - name: Tipos
+        run: |
+          if [ -f tsconfig.json ]; then npx tsc --noEmit; else echo "Sem tsconfig.json"; fi
+      - name: Build
+        env:
+          BUILD_ENV: ${{ inputs.build-env }}
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: |
+          set -euo pipefail
+          while IFS= read -r linha; do
+            case "$linha" in ''|'#'*) continue ;; esac
+            export "${linha?}"
+          done <<< "$BUILD_ENV"
+          npm run build --if-present
