@@ -23,8 +23,9 @@ GITHUB_ACTIONS = 15368  # integration_id do app GitHub Actions (evita check fals
 
 # Workflow caller -> checks que ele gera ("<job do caller> / <job do reusable>")
 CHECKS = {
-    "pr-check-maven.yml": ["build-test / Build & Test (Maven)"],
-    "pr-check-node.yml": ["check / Lint, tipos e build"],
+    "pr-check-maven.yml": ["build-test / Build & Test (Maven)", "build-test / gitleaks / Segredos (gitleaks)"],
+    "pr-check-node.yml": ["check / Lint, tipos e build", "check / gitleaks / Segredos (gitleaks)"],
+    "gitleaks.yml": ["gitleaks / Segredos (gitleaks)"],
     "check-migrations.yml": [
         "migrations / Migrations (estatica)",
         "migrations / Migrations (Postgres descartavel)",
