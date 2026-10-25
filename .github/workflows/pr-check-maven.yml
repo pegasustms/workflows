@@ -1,0 +1,54 @@
+name: PR Check Maven (Reusable)
+
+# Build e testes no PR, com o mesmo comando do build-test do build-push (que so roda
+# depois do merge). Pega teste quebrado, erro de compilacao e o Maven Enforcer
+# (roda no validate) antes do merge, e nao no deploy.
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        required: false
+        type: string
+        default: '25'
+      maven-server-id:
+        description: 'server-id do settings.xml para o GitHub Packages.'
+        required: false
+        type: string
+        default: 'github'
+    secrets:
+      PACKAGES_TOKEN:
+        required: false
+
+jobs:
+  build-test:
+    name: Build & Test (Maven)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+          server-id: ${{ inputs.maven-server-id }}
+          server-username: MAVEN_ACTOR
+          server-password: MAVEN_TOKEN
+      - name: Build e testes
+        env:
+          MAVEN_ACTOR: ${{ github.actor }}
+          MAVEN_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        # exclui testes @Tag("integration") (sobem contexto/infra), igual ao build-push
+        run: mvn -B clean verify -DexcludedGroups=integration
+      - name: Relatorios de teste
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/'
+          retention-days: 7
+          if-no-files-found: ignore
