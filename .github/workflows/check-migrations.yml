@@ -1,0 +1,164 @@
+name: Check Migrations (Reusable)
+
+# Barra migration Flyway quebrada antes do merge (pull_request) e antes do build do
+# deploy (push), sem tocar em banco nenhum de ambiente:
+#   1. estatica (git): nome fora do padrao, versao duplicada, migration ja mergeada
+#      alterada/renomeada/apagada (muda o checksum e trava o tenant_registry) e versao
+#      nova menor que a ultima do base (outOfOrder desligado = validate falha no boot);
+#   2. Postgres descartavel: aplica tudo do zero em schemas vazios, como o TenantService
+#      faz por tenant, e roda o validate. So roda quando alguma migration mudou.
+#
+# Base: no PR, o branch de destino; no push, github.event.before.
+
+on:
+  workflow_call:
+    inputs:
+      migrations-path:
+        description: 'Pasta das migrations. Vazio = a unica */src/main/resources/db/migration do repo.'
+        required: false
+        type: string
+        default: ''
+      schemas:
+        description: 'Schemas (separados por espaco) onde aplicar do zero. Dois tenants por padrao; tenant-service usa public.'
+        required: false
+        type: string
+        default: '00000000-0000-0000-0000-00000000c101 00000000-0000-0000-0000-00000000c102'
+      postgres-version:
+        description: 'Versao do Postgres (a mesma do RDS).'
+        required: false
+        type: string
+        default: '17'
+      flyway-version:
+        description: 'Versao do Flyway CLI (a mesma do flyway-core do Spring Boot).'
+        required: false
+        type: string
+        default: '11.14.1'
+
+jobs:
+  estatica:
+    name: Migrations (estatica)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      dir: ${{ steps.check.outputs.dir }}
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Checar nomes, versoes e alteracoes
+        id: check
+        env:
+          MIGRATIONS_PATH: ${{ inputs.migrations-path }}
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          erro() { echo "::error::$*"; falhou=1; }
+          linha() { tr '\n' ' ' <<< "$1"; }
+          falhou=0
+
+          # Pasta das migrations: input ou a unica db/migration do repo
+          dir="${MIGRATIONS_PATH:-}"
+          if [ -z "$dir" ]; then
+            dirs=$(git ls-files '*src/main/resources/db/migration/*' | xargs -r -n1 dirname | sort -u)
+            if [ "$(printf '%s' "$dirs" | grep -c .)" != 1 ]; then
+              echo "::error::Nao achei uma unica pasta db/migration; informe migrations-path. Achei: ${dirs:-nenhuma}"
+              exit 1
+            fi
+            dir=$dirs
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+          # V1_2__x.sql -> 1.2, no formato que o Flyway compara (numerico, sem zeros a direita)
+          versao() { sed -E 's#^(.*/)?V([0-9]+(_[0-9]+)*)__.*#\2#; s#_#.#g'; }
+          norm() { awk -F. '{ n = NF; while (n > 1 && $n + 0 == 0) n--; s = $1 + 0; for (i = 2; i <= n; i++) s = s "." ($i + 0); print s }'; }
+          versionadas() { grep -E '/V[^/]*\.sql$' || true; }
+
+          # Base de comparacao: no PR, o branch de destino; no push, o commit anterior
+          base=""
+          case "${EVENT:-}" in
+            pull_request) base=$(git merge-base "origin/$BASE_REF" HEAD 2>/dev/null || true) ;;
+            push) base="${BEFORE:-}" ;;
+          esac
+          if [ -n "$base" ] && { [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; }; then
+            echo "::warning::Commit base $base indisponivel; pulando as checagens contra o base"
+            base=""
+          fi
+
+          # 1. Nome fora do padrao: o Flyway ignora o arquivo sem avisar
+          ruins=$(git ls-files "$dir" | grep '\.sql$' | xargs -r -n1 basename | grep -vE '^(V[0-9]+(_[0-9]+)*|R)__.+\.sql$' || true)
+          [ -z "$ruins" ] || erro "Nome fora do padrao V<versao>__<descricao>.sql: $(linha "$ruins")"
+
+          # 2. Versao duplicada
+          dups=$(git ls-files "$dir" | versionadas | versao | norm | sort | uniq -d)
+          [ -z "$dups" ] || erro "Versao duplicada: $(linha "$dups")"
+
+          if [ -n "$base" ]; then
+            # 3. Migration ja mergeada nao pode ser editada, renomeada nem apagada (muda o checksum)
+            alteradas=$(git diff --name-status --no-renames "$base" HEAD -- "$dir" | awk '$1 != "A"' | versionadas)
+            [ -z "$alteradas" ] || erro "Migration existente alterada; crie uma nova versao: $(linha "$alteradas")"
+
+            # 4. Versao nova tem de ser maior que a ultima do base (outOfOrder desligado)
+            maior=$(git ls-tree -r --name-only "$base" -- "$dir" | versionadas | versao | norm | sort -V | tail -1)
+            for v in $(git diff --name-only --diff-filter=A --no-renames "$base" HEAD -- "$dir" | versionadas | versao | norm); do
+              if [ -n "$maior" ] && { [ "$v" = "$maior" ] || [ "$(printf '%s\n%s\n' "$maior" "$v" | sort -V | tail -1)" != "$v" ]; }; then
+                erro "V$v nao e maior que V$maior, a ultima do base"
+              fi
+            done
+
+            mudou=$([ -n "$(git diff --name-only "$base" HEAD -- "$dir")" ] && echo true || echo false)
+          else
+            mudou=true
+          fi
+          echo "changed=$mudou" >> "$GITHUB_OUTPUT"
+          echo "Pasta: $dir | base: ${base:-nenhum} | migrations mudaram: $mudou"
+
+          exit $falhou
+
+  postgres:
+    name: Migrations (Postgres descartavel)
+    needs: estatica
+    if: needs.estatica.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:${{ inputs.postgres-version }}-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+      - name: Aplicar migrations do zero
+        env:
+          DIR: ${{ needs.estatica.outputs.dir }}
+          SCHEMAS: ${{ inputs.schemas }}
+          FLYWAY_IMAGE: flyway/flyway:${{ inputs.flyway-version }}-alpine
+          JDBC_URL: jdbc:postgresql://localhost:5432/ci
+          DOCKER_NET: --network host
+        run: |
+          set -euo pipefail
+          read -ra rede <<< "$DOCKER_NET"
+          # Aplica todas as migrations do zero em cada schema e valida o resultado
+          for s in $SCHEMAS; do
+            for acao in migrate validate; do
+              docker run --rm "${rede[@]}" -v "$PWD/$DIR:/flyway/sql:ro" "$FLYWAY_IMAGE" \
+                -url="$JDBC_URL" -user=ci -password=ci \
+                -schemas="$s" -defaultSchema="$s" \
+                -locations=filesystem:/flyway/sql -validateMigrationNaming=true \
+                "$acao"
+            done
+          done
