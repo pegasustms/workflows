@@ -14,6 +14,7 @@ Tambem liga "apagar branch no merge" no repo.
 Uso: scripts/aplicar-rulesets.py [--dry-run] [repo ...]   (precisa do gh com admin)
 """
 import json
+import re
 import subprocess
 import sys
 
@@ -40,6 +41,13 @@ def gh(*args, entrada=None):
     return r.stdout
 
 
+def dispara_em_pr(conteudo):
+    """O bloco on: (ate a proxima chave de topo) tem pull_request. Reusable que so cita
+    pull_request no script nao conta."""
+    m = re.search(r"(?ms)^on:(.*?)(?=^\S)", conteudo + "\nfim:")
+    return bool(m) and "pull_request" in m.group(1)
+
+
 def checks_do_repo(repo, branch):
     """Checks gerados pelos callers de PR (pull_request) presentes no branch."""
     try:
@@ -51,7 +59,7 @@ def checks_do_repo(repo, branch):
         if not a["name"].endswith((".yml", ".yaml")):
             continue
         conteudo = gh("api", a["url"], "-H", "Accept: application/vnd.github.raw")
-        if "pull_request" not in conteudo:
+        if not dispara_em_pr(conteudo):
             continue
         for reusable, nomes in CHECKS.items():
             if f"/{reusable}@" in conteudo:
