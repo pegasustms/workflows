@@ -1,0 +1,35 @@
+name: Check docs (Reusable)
+
+# Valida a normalização da documentação (nomes kebab-case, frontmatter, links relativos, sem CNPJ/CPF real,
+# sem planilha/dump). Regras em scripts/docs/check-docs.py; guia em pegasustms/specs
+# (contributing/normalizacao-docs.md). CNPJ/CPF liberado por repo: <path>/.docs-allowlist.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: 'Pasta com os docs ("." no specs, "docs" nos serviços).'
+        required: false
+        type: string
+        default: 'docs'
+
+jobs:
+  check:
+    name: Normalização dos docs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: pegasustms/workflows
+          ref: main
+          path: .workflows-tools
+          sparse-checkout: scripts/docs
+      - name: Checar
+        env:
+          ALVO: ${{ inputs.path }}
+        run: |
+          if [ ! -d "$ALVO" ]; then echo "Sem pasta $ALVO; nada a checar."; exit 0; fi
+          python3 .workflows-tools/scripts/docs/check-docs.py "$ALVO"

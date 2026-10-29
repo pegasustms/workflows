@@ -1,0 +1,15 @@
+name: Check docs
+
+on:
+  pull_request:
+    paths: ['scripts/docs/**', '.github/workflows/check-docs.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  # Auto-teste do reusable contra os docs do próprio repo (pasta inexistente = passa)
+  docs:
+    uses: ./.github/workflows/check-docs.yml
+    with:
+      path: docs
