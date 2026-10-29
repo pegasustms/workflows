@@ -7,7 +7,9 @@ passa a exigir o check correspondente naquele repo.
 Regras, nos branches padrao, develop e main:
   - nao pode apagar o branch nem dar force push;
   - mudanca so por PR (sem exigir aprovacao);
-  - checks obrigatorios conforme os workflows presentes no branch padrao.
+  - checks obrigatorios conforme os workflows presentes no branch padrao. Repo com o
+    GitHub Actions desligado (ex.: template-service) nao exige check nenhum: os workflows
+    sao copiados para os repos novos, mas nunca rodariam ali e travariam os PRs.
 Bypass: so admin da org, e so dentro de um PR (push direto continua bloqueado).
 Tambem liga "apagar branch no merge" no repo.
 
@@ -48,8 +50,14 @@ def dispara_em_pr(conteudo):
     return bool(m) and "pull_request" in m.group(1)
 
 
+def actions_ligado(repo):
+    return json.loads(gh("api", f"repos/{ORG}/{repo}/actions/permissions"))["enabled"]
+
+
 def checks_do_repo(repo, branch):
     """Checks gerados pelos callers de PR (pull_request) presentes no branch."""
+    if not actions_ligado(repo):
+        return []
     try:
         arquivos = json.loads(gh("api", f"repos/{ORG}/{repo}/contents/.github/workflows?ref={branch}"))
     except RuntimeError:
