@@ -78,7 +78,7 @@ jobs:
           # 2a chave: aproveita os caches antigos do setup-java (cache: maven) na transicao
           restore-keys: |
             maven-${{ runner.os }}-
-            setup-java-${{ runner.os }}-${{ runner.arch }}-maven-
+            setup-java-${{ runner.os }}-x64-maven-
       - name: Build e testes
         env:
           MAVEN_ACTOR: ${{ github.actor }}
