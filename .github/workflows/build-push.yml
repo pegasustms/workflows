@@ -120,6 +120,8 @@ jobs:
           path: ${{ runner.temp }}/imagem/
           retention-days: 1
           if-no-files-found: error
+          # "Re-run all jobs" sobe de novo com o mesmo nome
+          overwrite: true
 
   build-push:
     name: Build & Push Image
