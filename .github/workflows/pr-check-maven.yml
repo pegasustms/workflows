@@ -63,3 +63,9 @@ jobs:
 
   gitleaks:
     uses: pegasustms/workflows/.github/workflows/gitleaks.yml@main
+
+  # Normalização do docs/ (nomes, frontmatter, links, dado real de cliente); repo sem docs/ passa direto
+  docs:
+    uses: pegasustms/workflows/.github/workflows/check-docs.yml@main
+    with:
+      path: docs
