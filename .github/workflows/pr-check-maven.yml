@@ -34,10 +34,18 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
-          cache: maven
           server-id: ${{ inputs.maven-server-id }}
           server-username: MAVEN_ACTOR
           server-password: MAVEN_TOKEN
+      # So restaura: cache salvo em PR fica preso ao ref do PR. Quem salva e o
+      # build-push (develop/main), visivel pros PRs que apontam pra essas branches.
+      - name: Restaurar repositorio Maven
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-
       - name: Build e testes
         env:
           MAVEN_ACTOR: ${{ github.actor }}

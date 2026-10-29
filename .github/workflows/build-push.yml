@@ -2,6 +2,12 @@ name: Build & Push (Reusable)
 
 # Estagio 1 de 4 da pipeline. Roda testes e publica a imagem no ECR.
 # Expoe version/image como outputs pro caller encadear deploy-vps/deploy-aws/release.
+#
+# O Maven roda uma vez so, no build-test: o jar Spring Boot que sai do verify vira
+# artifact e o build-push so empacota (JRE + jar + entrypoint.sh), sem Maven no Docker.
+# O Dockerfile do repo continua servindo pro build local (docker compose).
+# ~/.m2/repository fica no cache do Actions com restore-keys: pom alterado (bump do
+# commons) reaproveita o cache anterior e so baixa o que mudou.
 
 on:
   workflow_call:
@@ -19,6 +25,11 @@ on:
         required: false
         type: string
         default: 'github'
+      jar-path:
+        description: 'Jar a empacotar. Vazio = acha o unico jar Spring Boot (BOOT-INF) em **/target.'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_ACCESS_KEY_ID:
         required: false
@@ -53,16 +64,60 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
-          cache: maven
           server-id: ${{ inputs.maven-server-id }}
           server-username: MAVEN_ACTOR
           server-password: MAVEN_TOKEN
+      # cache: maven do setup-java nao tem restore-keys: qualquer mudanca de pom
+      # rebaixava tudo. Aqui o prefixo reaproveita o cache mais recente.
+      - name: Restaurar repositorio Maven
+        id: m2
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-
       - name: Build e testes
         env:
           MAVEN_ACTOR: ${{ github.actor }}
           MAVEN_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
         # exclui testes @Tag("integration") (sobem contexto/infra); rodar IT separado com infra
         run: mvn -B clean verify -DexcludedGroups=integration
+      # Salva mesmo com teste quebrado: as dependencias ja foram baixadas.
+      - name: Salvar repositorio Maven
+        if: ${{ !cancelled() && steps.m2.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.m2/repository
+          key: ${{ steps.m2.outputs.cache-primary-key }}
+      - name: Separar jar e entrypoint
+        env:
+          JAR_PATH: ${{ inputs.jar-path }}
+        run: |
+          set -euo pipefail
+          if [ -n "$JAR_PATH" ]; then
+            mapfile -t JARS < <(compgen -G "$JAR_PATH" || true)
+          else
+            JARS=()
+            while IFS= read -r j; do
+              if unzip -l "$j" | grep -q 'BOOT-INF/classes/'; then JARS+=("$j"); fi
+            done < <(find . -path '*/target/*.jar' -not -path './.git/*')
+          fi
+          if [ "${#JARS[@]}" -ne 1 ]; then
+            echo "::error::Esperado 1 jar Spring Boot, achei ${#JARS[@]}: ${JARS[*]:-nenhum}. Informe jar-path."
+            exit 1
+          fi
+          echo "Jar: ${JARS[0]}"
+          mkdir -p "$RUNNER_TEMP/imagem"
+          cp "${JARS[0]}" "$RUNNER_TEMP/imagem/app.jar"
+          cp entrypoint.sh "$RUNNER_TEMP/imagem/"
+      - name: Publicar jar
+        uses: actions/upload-artifact@v7
+        with:
+          name: imagem-${{ inputs.service-name }}
+          path: ${{ runner.temp }}/imagem/
+          retention-days: 1
+          if-no-files-found: error
 
   build-push:
     name: Build & Push Image
@@ -71,19 +126,35 @@ jobs:
     environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
     permissions:
       contents: read
-      packages: read
     outputs:
       version: ${{ steps.version.outputs.value }}
       image: ${{ steps.build.outputs.image }}
     steps:
-      - uses: actions/checkout@v7
       - name: Generate Version
         id: version
         run: |
-          TZ="America/Sao_Paulo"
-          DATE=$(TZ=$TZ date +'%Y%m%d')
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          echo "value=${DATE}-${SHORT_SHA}-${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+          DATE=$(TZ=America/Sao_Paulo date +'%Y%m%d')
+          echo "value=${DATE}-${GITHUB_SHA::7}-${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+      - name: Baixar jar
+        uses: actions/download-artifact@v8
+        with:
+          name: imagem-${{ inputs.service-name }}
+          path: ${{ runner.temp }}/imagem
+      # Mesmo estagio final do Dockerfile dos servicos, sem o estagio de build.
+      # Contexto proprio: o .dockerignore dos repos exclui **/target/.
+      - name: Dockerfile de runtime
+        run: |
+          cat > "$RUNNER_TEMP/imagem/Dockerfile" <<'DOCKERFILE'
+          ARG JAVA_VERSION=25
+          FROM eclipse-temurin:${JAVA_VERSION}-jre-alpine
+          RUN apk add --no-cache curl
+          WORKDIR /app
+          COPY app.jar app.jar
+          COPY entrypoint.sh ./
+          RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
+          EXPOSE 8080
+          ENTRYPOINT ["./entrypoint.sh"]
+          DOCKERFILE
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -95,30 +166,21 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-      - name: Cache Docker layers
-        uses: actions/cache@v6
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ inputs.service-name }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-${{ inputs.service-name }}-
       - name: Build, tag, and push image to ECR
         id: build
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ steps.version.outputs.value }}
-          GH_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+          JAVA_VERSION: ${{ inputs.java-version }}
+        # Cache inline no :latest do ECR: so a camada do jar muda; JRE + curl vem do cache.
         run: |
           IMAGE="$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker buildx build --platform linux/amd64 \
-            --build-arg GITHUB_ACTOR=${{ github.actor }} \
-            --secret id=gh_token,env=GH_TOKEN \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --build-arg JAVA_VERSION="$JAVA_VERSION" \
+            --cache-from type=registry,ref="$REGISTRY/$ECR_REPOSITORY:latest" \
+            --cache-to type=inline \
             -t "$IMAGE" \
             -t "$REGISTRY/$ECR_REPOSITORY:latest" \
             --push \
-            .
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+            "$RUNNER_TEMP/imagem"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
