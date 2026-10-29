@@ -22,6 +22,8 @@ from pathlib import Path
 # CNPJs fictícios (DV válido) para usar nos exemplos no lugar de dado de cliente
 FICTICIOS = {"11222333000181", "11222333000262", "44555666000181", "77888999000181",
              "12121212000106", "34343434000106", "56565656000106"}
+# CNPJs públicos que podem aparecer em qualquer repo
+PUBLICOS = {"31626220000159"}  # emissor da plataforma Pegasus
 TIPOS = {"spec", "adr", "guia", "runbook", "layout", "pesquisa", "issue", "roadmap",
          "template", "referencia", "postmortem", "indice", "design", "estado-atual"}
 STATUS = {"draft", "approved", "em-andamento", "implementado", "pausado", "cancelado", "obsoleto", "vigente"}
@@ -140,7 +142,7 @@ def main():
     ap.add_argument("--allowlist", default=None)
     a = ap.parse_args()
     raiz = Path(a.raiz)
-    allow = set(FICTICIOS)
+    allow = set(FICTICIOS) | PUBLICOS
     arq = Path(a.allowlist) if a.allowlist else raiz / ".docs-allowlist"
     if arq.exists():
         for linha in arq.read_text().splitlines():
