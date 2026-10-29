@@ -29,6 +29,7 @@ CHECKS = {
     "pr-check-maven.yml": ["build-test / Build & Test (Maven)", "build-test / gitleaks / Segredos (gitleaks)"],
     "pr-check-node.yml": ["check / Lint, tipos e build", "check / gitleaks / Segredos (gitleaks)"],
     "gitleaks.yml": ["gitleaks / Segredos (gitleaks)"],
+    "check-docs.yml": ["docs / Normalização dos docs"],
     "check-migrations.yml": [
         "migrations / Migrations (estatica)",
         "migrations / Migrations (Postgres descartavel)",
