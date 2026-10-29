@@ -7,7 +7,6 @@ Cada repo do Pegasus (services + terraform + frontend) precisa de 1-2 callers qu
 
 | Template | Para que tipo de repo | O que faz |
 |---|---|---|
-| [`service-on-push.yml`](service-on-push.yml) | Cada microsserviço Java (16) | Build + push ECR + deploy quando push em main |
 | [`service-toggle.yml`](service-toggle.yml) | Cada microsserviço (opcional) | Botão "subir/descer" service no GitHub UI |
 | [`service-smoke.yml`](service-smoke.yml) | Cada microsserviço (opcional) | Health check após deploy |
 | [`terraform-pr-plan.yml`](terraform-pr-plan.yml) | Repo `pegasustms/terraform` | Roda plan em PRs e comenta resultado |
@@ -19,12 +18,7 @@ Cada repo do Pegasus (services + terraform + frontend) precisa de 1-2 callers qu
 
 ### Para cada microsserviço (16×)
 
-Copiar para `<service>/.github/workflows/deploy.yml`:
-
-```yaml
-# Copiado de pegasustms/workflows/templates/service-on-push.yml
-# Substituir 'tenant-service' → nome real do service.
-```
+O `deploy.yml` do serviço segue o caller do [README principal](../README.md#pipeline-dos-serviços) (`build-push` → `deploy-vps`/`deploy-aws` → `release`). Daqui, só os opcionais (`service-toggle.yml`, `service-smoke.yml`).
 
 ### Para o terraform
 
