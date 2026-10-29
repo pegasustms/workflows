@@ -154,6 +154,11 @@ jobs:
           COPY app.jar app.jar
           COPY entrypoint.sh ./
           RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
+          # service.version do OpenTelemetry (application-*.yml le APP_VERSION) = tag da imagem.
+          # No fim para nao invalidar o cache das camadas de JRE/curl.
+          ARG APP_VERSION=unknown
+          ARG GIT_COMMIT_SHA=unknown
+          ENV APP_VERSION=${APP_VERSION} GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
           EXPOSE 8080
           ENTRYPOINT ["./entrypoint.sh"]
           DOCKERFILE
@@ -179,6 +184,8 @@ jobs:
           IMAGE="$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker buildx build --platform linux/amd64 \
             --build-arg JAVA_VERSION="$JAVA_VERSION" \
+            --build-arg APP_VERSION="$IMAGE_TAG" \
+            --build-arg GIT_COMMIT_SHA="$GITHUB_SHA" \
             --cache-from type=registry,ref="$REGISTRY/$ECR_REPOSITORY:latest" \
             --cache-to type=inline \
             -t "$IMAGE" \
