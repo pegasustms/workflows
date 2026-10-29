@@ -1,0 +1,109 @@
+name: Amplify Status (Reusable)
+
+# O Amplify builda os frontends a partir do webhook de push, mas nao devolve o resultado
+# ao GitHub (conexao por token, sem o GitHub App). Este job acompanha o build do Amplify
+# para o commit do push e falha junto com ele, para o deploy quebrado aparecer como check
+# no commit. Em falha, imprime o fim do log do passo que quebrou.
+
+on:
+  workflow_call:
+    inputs:
+      app-id:
+        description: 'ID do app no Amplify (ex.: d1klwr6p1p9bjj).'
+        required: true
+        type: string
+      branch:
+        description: 'Branch do Amplify. Padrao: a branch do push.'
+        required: false
+        type: string
+        default: ''
+      timeout-minutes:
+        description: 'Tempo maximo esperando o build terminar, incluindo a espera pelo job aparecer (o job tem limite de 45 min).'
+        required: false
+        type: number
+        default: 30
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+
+jobs:
+  amplify:
+    name: Deploy Amplify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions: {}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Aguardar build do Amplify
+        env:
+          APP_ID: ${{ inputs.app-id }}
+          BRANCH: ${{ inputs.branch || github.ref_name }}
+          SHA: ${{ github.sha }}
+          TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+        run: |
+          set -euo pipefail
+          CONSOLE="https://${AWS_REGION}.console.aws.amazon.com/amplify/apps/${APP_ID}/branches/${BRANCH}/deployments"
+          DEADLINE=$((SECONDS + TIMEOUT_MINUTES * 60))
+
+          # O webhook dispara o build em segundos, mas o job pode ainda nao existir
+          JOB_ID=""
+          while [ -z "$JOB_ID" ]; do
+            JOB_ID=$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" --no-paginate --max-results 50 \
+              --query "jobSummaries[?commitId=='${SHA}'] | [0].jobId" --output text)
+            [ "$JOB_ID" = "None" ] && JOB_ID=""
+            if [ -z "$JOB_ID" ]; then
+              if [ $SECONDS -ge $DEADLINE ]; then
+                echo "::error::Nenhum build do Amplify para ${SHA} na branch ${BRANCH} (${CONSOLE})"
+                exit 1
+              fi
+              sleep 15
+            fi
+          done
+          echo "Build do Amplify: job ${JOB_ID} (${CONSOLE}/${JOB_ID})"
+
+          while :; do
+            STATUS=$(aws amplify get-job --app-id "$APP_ID" --branch-name "$BRANCH" --job-id "$JOB_ID" \
+              --query 'job.summary.status' --output text)
+            case "$STATUS" in
+              SUCCEED|FAILED|CANCELLED) break ;;
+            esac
+            if [ $SECONDS -ge $DEADLINE ]; then
+              echo "::error::Build ${JOB_ID} do Amplify ainda em ${STATUS} apos ${TIMEOUT_MINUTES} min (${CONSOLE}/${JOB_ID})"
+              exit 1
+            fi
+            sleep 15
+          done
+
+          {
+            echo "### Amplify: ${STATUS}"
+            echo ""
+            echo "App \`${APP_ID}\`, branch \`${BRANCH}\`, job [${JOB_ID}](${CONSOLE}/${JOB_ID})"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$STATUS" = "SUCCEED" ]; then
+            echo "Build ${JOB_ID} do Amplify concluido"
+            exit 0
+          fi
+
+          # logUrl e uma URL pre-assinada do S3, valida por pouco tempo
+          aws amplify get-job --app-id "$APP_ID" --branch-name "$BRANCH" --job-id "$JOB_ID" \
+            --query "job.steps[?status=='FAILED'].[stepName, logUrl]" --output text |
+          while read -r STEP LOG_URL; do
+            echo "::group::Fim do log do passo ${STEP}"
+            if [ -n "$LOG_URL" ] && [ "$LOG_URL" != "None" ]; then
+              curl -fsSL "$LOG_URL" | tail -n 100 || echo "(nao foi possivel baixar o log)"
+            else
+              echo "(passo sem log)"
+            fi
+            echo "::endgroup::"
+          done
+          echo "::error::Build ${JOB_ID} do Amplify terminou em ${STATUS} (${CONSOLE}/${JOB_ID})"
+          exit 1

@@ -68,6 +68,31 @@ Com `secrets: inherit`, o repositório (ou a organização) precisa ter: `AWS_AC
 
 O `service-name` tem de ser igual ao nome do repositório ECR, ao do service no `docker-compose.vps.yml` e ao do container na task definition do ECS.
 
+## Frontends
+
+| Workflow | O que faz |
+|---|---|
+| `pr-check-node.yml` | Lint (catraca por arquivo), tipos e build no PR |
+| `amplify-status.yml` | No push, espera o build do Amplify para o commit e falha junto com ele, imprimindo o fim do log do passo que quebrou. O Amplify está conectado por token, sem o GitHub App, então não publica check no GitHub. |
+
+Caller do `amplify-status.yml` (o Amplify só builda `develop`):
+
+```yaml
+on:
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  amplify:
+    uses: pegasustms/workflows/.github/workflows/amplify-status.yml@main
+    with:
+      app-id: d1klwr6p1p9bjj
+    secrets: inherit
+```
+
 ## Operação na AWS
 
 | Workflow | O que faz |
