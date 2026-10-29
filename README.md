@@ -6,7 +6,7 @@ GitHub Actions reutilizáveis (`workflow_call`) do Pegasus TMS. Os microsserviç
 
 | Workflow | Estágio | O que faz |
 |---|---|---|
-| `build-push.yml` | 1 | `mvn -B clean verify -DexcludedGroups=integration` (Java 25, dependências do GitHub Packages) e build `linux/amd64` da imagem, publicada no ECR `pegasus/<service-name>` com a tag `<aaaammdd>-<sha>-<env>` e `latest`. O token do GitHub Packages entra no Docker como secret do BuildKit (`gh_token`). Saídas: `version` e `image`. |
+| `build-push.yml` | 1 | `mvn -B clean verify -DexcludedGroups=integration` (Java 25, dependências do GitHub Packages, `~/.m2/repository` no cache do Actions com `restore-keys`). O jar Spring Boot (o único com `BOOT-INF/` em `**/target`, ou o input `jar-path`) e o `entrypoint.sh` passam por artifact para o job da imagem, que só empacota JRE + jar (`linux/amd64`, sem Maven no Docker; o Dockerfile do repo fica para o build local) e publica no ECR `pegasus/<service-name>` com a tag `<aaaammdd>-<sha>-<env>` e `latest`. Saídas: `version` e `image`. |
 | `deploy-vps.yml` | 2 (dev) | Ambiente dev: via SSH, faz login no ECR na VPS (o token sai do runner), grava `<SERVICO>_TAG` no `.env` do compose e sobe só o serviço com `docker compose -f docker-compose.vps.yml up -d --no-deps`. A troca do `.env` roda sob `flock`, com backup rotativo (`.env.bak.1..5`) e aborta se alguma variável fosse sumir. Depois espera o container ficar `healthy` (`health-timeout`, padrão 300 s; `0` desliga). |
 | `deploy-aws.yml` | 2 (prod) | Registra nova revisão da task definition com a imagem (e `APP_VERSION` / `GIT_COMMIT_SHA`) e atualiza o service `pegasus-<env>-<service-name>` no cluster `pegasus-<env>-cluster`; espera estabilizar quando `desired_count > 0`. |
 | `release.yml` | 3 | Cria tag e GitHub Release: `<timestamp>-<sha>` em `main`, `<timestamp>-<sha>-rc` (pre-release) nas demais branches. |
@@ -79,6 +79,4 @@ O `service-name` tem de ser igual ao nome do repositório ECR, ao do service no 
 
 ## Legado
 
-- `deploy-service.yml`: build e deploy no ECS num único job (anterior ao pipeline acima).
-- `build-and-push-gcp.yml` e `deploy-service-gcp.yml`: Artifact Registry / Cloud Run, da época do GCP.
-- `templates/`: callers de exemplo dessa primeira versão; não refletem o pipeline atual.
+- `templates/`: callers de exemplo da primeira versão; não refletem o pipeline atual.
