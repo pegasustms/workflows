@@ -111,8 +111,7 @@ jobs:
                 echo "::warning::$arq removido/renomeado para desfazer a versao duplicada V$v do base"
                 continue
               fi
-              alteradas="${alteradas:+$alteradas
-}$st	$arq"
+              alteradas+="$st"$'\t'"$arq"$'\n'
             done < <(git diff --name-status --no-renames "$base" HEAD -- "$dir" | awk '$1 != "A"' | versionadas)
             [ -z "$alteradas" ] || erro "Migration existente alterada; crie uma nova versao: $(linha "$alteradas")"
 
