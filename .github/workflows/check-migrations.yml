@@ -98,8 +98,22 @@ jobs:
           [ -z "$dups" ] || erro "Versao duplicada: $(linha "$dups")"
 
           if [ -n "$base" ]; then
-            # 3. Migration ja mergeada nao pode ser editada, renomeada nem apagada (muda o checksum)
-            alteradas=$(git diff --name-status --no-renames "$base" HEAD -- "$dir" | awk '$1 != "A"' | versionadas)
+            # 3. Migration ja mergeada nao pode ser editada, renomeada nem apagada (muda o checksum).
+            # Excecao: se o base ja tem uma versao duplicada (dois PRs mergeados com o mesmo numero), o Flyway
+            # recusa subir e a unica saida e renomear um dos arquivos. Apagar/renomear um arquivo dessa versao
+            # passa; editar continua proibido. Quem renomeia escolhe o que ainda nao rodou em nenhum ambiente.
+            dupsbase=$(git ls-tree -r --name-only "$base" -- "$dir" | versionadas | versao | norm | sort | uniq -d)
+            alteradas=""
+            while IFS=$'\t' read -r st arq; do
+              [ -n "$arq" ] || continue
+              v=$(printf '%s\n' "$arq" | versao | norm)
+              if [ "$st" = "D" ] && [ -n "$dupsbase" ] && grep -qxF "$v" <<< "$dupsbase"; then
+                echo "::warning::$arq removido/renomeado para desfazer a versao duplicada V$v do base"
+                continue
+              fi
+              alteradas="${alteradas:+$alteradas
+}$st	$arq"
+            done < <(git diff --name-status --no-renames "$base" HEAD -- "$dir" | awk '$1 != "A"' | versionadas)
             [ -z "$alteradas" ] || erro "Migration existente alterada; crie uma nova versao: $(linha "$alteradas")"
 
             # 4. Versao nova tem de ser maior que a ultima do base (outOfOrder desligado)
