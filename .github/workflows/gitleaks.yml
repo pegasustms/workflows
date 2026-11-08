@@ -41,7 +41,9 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
 
@@ -49,7 +51,23 @@ jobs:
           # Segredo que ja estava no historico nao trava PR: rotacione a chave no provedor.
           opts=()
           if [ "${EVENT:-}" = pull_request ]; then
-            base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
+            # PR empilhado: a base pode ter sido mergeada e apagada depois do evento (o rerun reaproveita o
+            # evento antigo). Tenta a branch, depois o commit da base gravado no evento, depois develop e a padrao.
+            ref=""
+            for cand in "origin/$BASE_REF" "${BASE_SHA:-}" origin/develop "origin/${DEFAULT_BRANCH:-main}"; do
+              if [ -n "$cand" ] && git rev-parse --verify --quiet "$cand^{commit}" >/dev/null; then
+                ref="$cand"
+                break
+              fi
+            done
+            if [ -z "$ref" ]; then
+              echo "::error::Nenhuma base encontrada para o PR (branch $BASE_REF apagada e sem develop/${DEFAULT_BRANCH:-main})"
+              exit 1
+            fi
+            if [ "$ref" != "origin/$BASE_REF" ]; then
+              echo "::notice::Base $BASE_REF nao existe mais; usando $ref"
+            fi
+            base=$(git merge-base "$ref" "$HEAD_SHA")
             opts=(--log-opts="$base..$HEAD_SHA")
             echo "Varrendo $(git rev-list --count "$base..$HEAD_SHA") commit(s) do PR"
           else
